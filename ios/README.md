@@ -23,76 +23,99 @@
 - Consistent spacing and typography
 - Terminal-style monospace fonts throughout
 
+## Quick Start
+
+### Building
+
+```bash
+# Using Xcode
+xcodebuild -project VibeTunnel-iOS.xcodeproj -scheme VibeTunnel-iOS build
+
+# Using build script
+./scripts/build.sh
+
+# Build for simulator
+./scripts/build.sh --simulator
+
+# Debug build
+./scripts/build.sh --configuration Debug
+```
+
+### Running Tests
+
+```bash
+# Run with coverage report (75% threshold)
+./scripts/test-with-coverage.sh
+
+# Quick test run
+./scripts/quick-test.sh
+```
+
+### Code Quality
+
+```bash
+# Format and lint code
+./scripts/lint.sh
+```
+
 ## 📱 Setup Instructions
 
-### 1. Create Xcode Project
+### Initial Team Configuration
 
-1. Open Xcode 16+
-2. Create a new project:
-   - Choose **iOS** → **App**
-   - Product Name: `VibeTunnel`
-   - Team: Select your development team
-   - Organization Identifier: Your identifier (e.g., `com.yourcompany`)
-   - Interface: **SwiftUI**
-   - Language: **Swift**
-   - Minimum Deployments: **iOS 18.0**
-   - Save in the `ios/` directory
+VibeTunnel uses the same xcconfig approach as the macOS app for team management.
 
-### 2. Add Project Files
-
-1. Delete the default `ContentView.swift` and `VibeTunnelApp.swift`
-2. Drag the entire `VibeTunnel/` folder into Xcode
-3. Choose "Create groups" and ensure "Copy items if needed" is checked
-4. Make sure the target membership is set for all files
-
-### 3. Add SwiftTerm Package
-
-1. Select your project in the navigator
-2. Select the VibeTunnel target
-3. Go to **Package Dependencies** tab
-4. Click the **+** button
-5. Enter: `https://github.com/migueldeicaza/SwiftTerm.git`
-6. Version rule: **Up to Next Major** from `1.2.0`
-7. Click **Add Package**
-8. Select **SwiftTerm** library and add to VibeTunnel target
-
-### 4. Configure Info.plist
-
-1. Replace the auto-generated Info.plist with the one in `Resources/Info.plist`
-2. Or manually add:
-   ```xml
-   <key>NSAppTransportSecurity</key>
-   <dict>
-       <key>NSAllowsArbitraryLoads</key>
-       <true/>
-   </dict>
+1. **Copy the template file to create your local configuration:**
+   ```bash
+   cp ../apple/Local.xcconfig.template ../apple/Local.xcconfig
    ```
 
-### 5. (Optional) Add Custom Fonts
+2. **Edit `../apple/Local.xcconfig` and add your development team ID:**
+   ```
+   DEVELOPMENT_TEAM = YOUR_TEAM_ID_HERE
+   ```
 
-For the best experience, add Fira Code font:
-1. Download [Fira Code](https://github.com/tonsky/FiraCode)
-2. Add `.ttf` files to the project
-3. Ensure they're included in the target
-4. The Info.plist already includes font references
+   **Finding your team ID in Xcode:**
+   - Open Xcode → Settings (or Preferences) 
+   - Go to Accounts tab
+   - Select your Apple ID
+   - Look for your Team ID in the team details
 
-### 6. Build and Run
+3. **Open the project in Xcode** - it will now use your personal development team automatically.
+
+### Project Setup
+
+The iOS project is already configured and ready to build. The main steps are:
+
+1. **Install dependencies:** Open the project in Xcode and it will automatically resolve Swift Package dependencies (SwiftTerm)
+2. **Set your team ID:** Follow the team configuration steps above
+3. **Build and run:** Use Xcode or the build script
+
+### Advanced Setup (if needed)
+
+If you need to recreate the project from scratch:
+
+1. The project uses SwiftTerm package: `https://github.com/migueldeicaza/SwiftTerm.git`
+2. Minimum deployment target: iOS 18.0
+3. Required Info.plist keys are already configured in `Resources/Info.plist`
+4. Custom fonts (Fira Code) can be added to improve the terminal experience
+
+### Build and Run
 
 #### Using Xcode
 1. Select your device or simulator (iOS 18+)
 2. Press **⌘R** to build and run
 3. The app will launch with the beautiful connection screen
 
-#### Using xcodebuildmcp
+#### Using Command Line
 ```bash
 # Build the app
-xcodebuildmcp build -workspace ../VibeTunnel.xcworkspace -scheme VibeTunnel-iOS
+./scripts/build.sh
 
-# Run tests
-xcodebuildmcp test -workspace ../VibeTunnel.xcworkspace -scheme VibeTunnel-iOS
+# Build for simulator  
+./scripts/build.sh --simulator
 
-# Build for device
-xcodebuildmcp build -workspace ../VibeTunnel.xcworkspace -scheme VibeTunnel-iOS -destination "generic/platform=iOS"
+# Run tests with coverage
+./scripts/test-with-coverage.sh
 ```
 
 ## 🏗️ Architecture

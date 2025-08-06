@@ -16,11 +16,18 @@ This comprehensive guide covers all aspects of code signing for VibeTunnel, from
 VibeTunnel uses xcconfig files to manage developer team settings, allowing multiple developers to work without code signing conflicts.
 
 1. **Copy the template file to create your local configuration:**
+   
+   For the macOS app:
    ```bash
-   cp ../apple/Local.xcconfig.template ../apple/Local.xcconfig
+   cp ../apple/Local.xcconfig.template VibeTunnel/Local.xcconfig
+   ```
+   
+   For the iOS app:
+   ```bash
+   cp ../../apple/Local.xcconfig.template ../ios/VibeTunnel/Local.xcconfig
    ```
 
-2. **Edit `../apple/Local.xcconfig` and add your development team ID:**
+2. **Edit the Local.xcconfig file and add your development team ID:**
    ```
    DEVELOPMENT_TEAM = YOUR_TEAM_ID_HERE
    ```
@@ -36,7 +43,8 @@ VibeTunnel uses xcconfig files to manage developer team settings, allowing multi
 ### How xcconfig Works
 
 - `VibeTunnel/Shared.xcconfig` - Contains shared configuration and includes local settings
-- `../apple/Local.xcconfig` - Your personal settings (ignored by git)
+- `VibeTunnel/Local.xcconfig` - Your personal settings for macOS app (ignored by git)
+- `../ios/VibeTunnel/Local.xcconfig` - Your personal settings for iOS app (ignored by git)
 - `../apple/Local.xcconfig.template` - Template for new developers
 
 ### Avoiding Keychain Dialogs During Development
