@@ -114,4 +114,55 @@ struct ServerListViewModelTests {
 
         #expect(viewModel.currentConnectingProfile?.id == profile.id)
     }
+
+    @Test("Connection error sets error message with localized description")
+    func connectionErrorSetsErrorMessage() async throws {
+        let (viewModel, _) = createTestViewModel()
+
+        // Create a profile with an invalid/unreachable server address
+        let profile = createTestProfile(
+            name: "Invalid Server",
+            url: "http://192.168.999.999:4020" // Invalid IP address
+        )
+        try await viewModel.addProfile(profile, password: nil)
+
+        // Clear any existing error message
+        viewModel.errorMessage = nil
+
+        // Attempt to connect - this should fail and set errorMessage
+        await viewModel.initiateConnectionToProfile(profile)
+
+        // Verify that an error message was set
+        #expect(viewModel.errorMessage != nil)
+        #expect(viewModel.errorMessage?.contains("Failed to connect") == true ||
+            viewModel.errorMessage?.contains("Cannot") == true ||
+            viewModel.errorMessage?.contains("Invalid") == true
+        )
+    }
+
+    @Test("No network connection sets appropriate error message")
+    func noNetworkConnectionSetsErrorMessage() async {
+        // Create a mock network monitor that simulates no connection
+        let mockNetworkMonitor = MockNetworkMonitor(isConnected: false)
+        let mockStorage = MockStorage()
+        let connectionManager = ConnectionManager.createForTesting(storage: mockStorage)
+
+        let viewModel = ServerListViewModel(
+            connectionManager: connectionManager,
+            networkMonitor: mockNetworkMonitor,
+            keychainService: MockKeychainService(),
+            userDefaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!
+        )
+
+        let profile = createTestProfile()
+
+        // Clear any existing error message
+        viewModel.errorMessage = nil
+
+        // Attempt to connect without network
+        await viewModel.initiateConnectionToProfile(profile)
+
+        // Verify the specific error message for no network
+        #expect(viewModel.errorMessage == "No internet connection available")
+    }
 }

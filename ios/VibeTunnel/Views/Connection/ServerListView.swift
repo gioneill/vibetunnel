@@ -12,6 +12,7 @@ struct ServerListView: View {
     @State private var showingDiscoverySheet = false
     @State private var selectedDiscoveredServer: DiscoveredServer?
     @State private var serverToAdd: DiscoveredServer?
+    @State private var showErrorAlert = false
 
     /// Inject ViewModel directly - clean separation
     init(viewModel: ServerListViewModel = ServerListViewModel()) {
@@ -141,6 +142,16 @@ struct ServerListView: View {
         }
         .onDisappear {
             discoveryService.stopDiscovery()
+        }
+        .onChange(of: viewModel.errorMessage) { _, newValue in
+            showErrorAlert = newValue != nil
+        }
+        .alert("Error", isPresented: $showErrorAlert, presenting: viewModel.errorMessage) { _ in
+            Button("OK") {
+                viewModel.errorMessage = nil
+            }
+        } message: { errorMessage in
+            Text(errorMessage)
         }
         .sheet(isPresented: $showingDiscoverySheet) {
             DiscoveryDetailSheet(
