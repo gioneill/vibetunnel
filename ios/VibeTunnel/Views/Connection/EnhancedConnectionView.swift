@@ -303,7 +303,9 @@ struct ServerProfileEditView: View {
                     }
 
                     TextField("Name", text: $profile.name)
+                        .textInputAutocapitalization(.never)
                     TextField("URL", text: $profile.url)
+                        .textInputAutocapitalization(.never)
 
                     Toggle("Requires Authentication", isOn: $profile.requiresAuth)
 
@@ -312,6 +314,7 @@ struct ServerProfileEditView: View {
                             get: { profile.username ?? "admin" },
                             set: { profile.username = $0 }
                         ))
+                        .textInputAutocapitalization(.never)
                         SecureField("Password", text: $password)
                             .textContentType(.password)
                     }
