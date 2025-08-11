@@ -18,6 +18,8 @@ struct TerminalHostingView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> SwiftTerm.TerminalView {
         let terminal = SwiftTerm.TerminalView()
+        terminal.translatesAutoresizingMaskIntoConstraints = false
+        terminal.contentMode = .redraw
 
         // Configure terminal appearance with theme
         terminal.backgroundColor = UIColor(theme.background)
@@ -64,11 +66,19 @@ struct TerminalHostingView: UIViewRepresentable {
         // Configure font
         updateFont(terminal, size: fontSize)
 
-        // Start with default size
-        let cols = Int(UIScreen.main.bounds.width / 9) // Approximate char width
-        let rows = 24
+        // Start with server-reported dimensions if available, otherwise use sensible defaults
+        // Always honor server's row count as it knows the actual terminal environment
+        let serverRows = viewModel.terminalRows > 0 ? viewModel.terminalRows : 24
+        let serverCols = viewModel.terminalCols > 0 ? viewModel.terminalCols : 80
+        
+        // For width: use screen-based calculation as default (will be overridden by user preference if set)
+        let screenBasedCols = Int(UIScreen.main.bounds.width / 9) // Approximate char width
+        let cols = viewModel.terminalCols > 0 ? serverCols : screenBasedCols
+        let rows = serverRows  // Always use server's row count when available
         terminal.resize(cols: cols, rows: rows)
 
+        // Provide terminal instance to coordinator early to avoid races
+        context.coordinator.terminal = terminal
         return terminal
     }
 
@@ -105,8 +115,10 @@ struct TerminalHostingView: UIViewRepresentable {
         ]
         terminal.installColors(ansiColors)
 
-        // Update terminal content from viewModel
-        context.coordinator.terminal = terminal
+        // Terminal reference is already set in makeUIView, just update if needed
+        if context.coordinator.terminal !== terminal {
+            context.coordinator.terminal = terminal
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -152,6 +164,8 @@ struct TerminalHostingView: UIViewRepresentable {
         let viewModel: TerminalViewModel
         weak var terminal: SwiftTerm.TerminalView?
         private let logger = Logger(category: "Terminal")
+        private var displayLink: CADisplayLink?
+        private var displayLinkFramesRemaining: Int = 0
 
         // Track previous buffer state for incremental updates
         private var previousSnapshot: BufferSnapshot?
@@ -174,60 +188,136 @@ struct TerminalHostingView: UIViewRepresentable {
             // Set the coordinator reference on the viewModel
             Task { @MainActor in
                 viewModel.terminalCoordinator = self
+                viewModel.notifyCoordinatorReady()
             }
         }
 
         /// Update terminal buffer from binary buffer data using optimized ANSI sequences
         func updateBuffer(from snapshot: BufferSnapshot) {
-            guard let terminal else { return }
+            guard let terminal else {
+                logger.error("❌ updateBuffer called but terminal is nil!")
+                return
+            }
+
+            logger.info("🧵 updateBuffer on main thread: \(Thread.isMainThread)")
+            
+            // Get the actual terminal dimensions (what iOS can display)
+            let terminalRows = terminal.getTerminal().rows
+            
+            // Apply viewport windowing if server sent more rows than we can display
+            var adjustedSnapshot = snapshot
+            if snapshot.rows > terminalRows {
+                logger.info("📐 Windowing: server sent \(snapshot.rows) rows, terminal shows \(terminalRows) rows, cursor at row \(snapshot.cursorY)")
+                
+                // Calculate the visible window to keep cursor in view
+                let cursorRow = snapshot.cursorY
+                let halfHeight = terminalRows / 2
+                
+                let visibleStart: Int
+                if cursorRow < halfHeight {
+                    // Cursor near top - show from beginning
+                    visibleStart = 0
+                } else if cursorRow >= snapshot.rows - halfHeight {
+                    // Cursor near bottom - show last rows
+                    visibleStart = max(0, snapshot.rows - terminalRows)
+                } else {
+                    // Cursor in middle - center window around cursor
+                    visibleStart = cursorRow - halfHeight
+                }
+                
+                let visibleEnd = min(visibleStart + terminalRows, snapshot.rows)
+                
+                // Extract only the visible cells
+                let visibleCells = Array(snapshot.cells[visibleStart..<visibleEnd])
+                
+                // Adjust cursor position relative to visible window
+                let adjustedCursorY = cursorRow - visibleStart
+                
+                logger.info("📐 Window: showing rows \(visibleStart)-\(visibleEnd-1), cursor at local row \(adjustedCursorY)")
+                
+                // Create adjusted snapshot with windowed data
+                adjustedSnapshot = BufferSnapshot(
+                    cols: snapshot.cols,
+                    rows: visibleCells.count,
+                    viewportY: 0, // Reset viewport since we're windowing
+                    cursorX: snapshot.cursorX,
+                    cursorY: adjustedCursorY,
+                    cells: visibleCells
+                )
+            }
+
+            // Check if buffer has any visible content
+            var visibleCellCount = 0
+            var totalCells = 0
+            for row in adjustedSnapshot.cells {
+                for cell in row {
+                    totalCells += 1
+                    if cell.char != " " && cell.char != "" && cell.width > 0 {
+                        visibleCellCount += 1
+                    }
+                }
+            }
 
             logger
-                .verbose(
-                    "updateBuffer called with snapshot: \(snapshot.cols)x\(snapshot.rows), cursor: (\(snapshot.cursorX),\(snapshot.cursorY))"
+                .info(
+                    "📝 updateBuffer: \(adjustedSnapshot.cols)x\(adjustedSnapshot.rows), cursor: (\(adjustedSnapshot.cursorX),\(adjustedSnapshot.cursorY)), visible cells: \(visibleCellCount)/\(totalCells)"
                 )
 
-            // Update terminal dimensions if needed
+            // Skip entirely empty buffers unless it's the first update
+            if visibleCellCount == 0 && !isFirstUpdate {
+                logger.warning("⏭️ Skipping empty buffer update to preserve local content")
+                return
+            }
+
+            // Check terminal dimensions but don't auto-resize in updateBuffer
             let currentCols = terminal.getTerminal().cols
             let currentRows = terminal.getTerminal().rows
 
-            if currentCols != snapshot.cols || currentRows != snapshot.rows {
-                terminal.resize(cols: snapshot.cols, rows: snapshot.rows)
-                // Force full redraw on resize
-                isFirstUpdate = true
+            let dimensionsMismatch = currentCols != adjustedSnapshot.cols || currentRows != adjustedSnapshot.rows
+            if dimensionsMismatch {
+                logger.debug("📐 Dimension info - Terminal: \(currentCols)x\(currentRows), Buffer: \(adjustedSnapshot.cols)x\(adjustedSnapshot.rows)")
+                // Don't resize here - let the UI-driven resize handle terminal dimensions
+                // Just render the buffer content as-is
+                // We'll force a full redraw below but NOT clear the screen
             }
 
-            // Handle viewport scrolling
-            let viewportChanged = previousSnapshot?.viewportY != snapshot.viewportY
-            if viewportChanged && previousSnapshot != nil {
-                // Calculate scroll delta
-                let scrollDelta = snapshot.viewportY - (previousSnapshot?.viewportY ?? 0)
-                handleViewportScroll(delta: scrollDelta, snapshot: snapshot)
-            }
+            // Handle viewport scrolling - disabled when using windowing
+            let viewportChanged = false // Viewport is now handled by windowing
 
             // Use incremental updates if possible
             let ansiData: String
-            if isFirstUpdate || previousSnapshot == nil || viewportChanged {
+            if isFirstUpdate || previousSnapshot == nil || viewportChanged || dimensionsMismatch {
                 // Full redraw needed
-                ansiData = convertBufferToOptimizedANSI(snapshot, clearScreen: isFirstUpdate)
+                // Only clear screen on the very first update, not on dimension mismatches
+                let wasFirstUpdate = isFirstUpdate
+                ansiData = convertBufferToOptimizedANSI(adjustedSnapshot, clearScreen: isFirstUpdate)
                 isFirstUpdate = false
-                logger.verbose("Full redraw performed")
+                logger.verbose("Full redraw performed (wasFirstUpdate: \(wasFirstUpdate), dimensionsMismatch: \(dimensionsMismatch))")
             } else if let previous = previousSnapshot {
                 // Incremental update
-                ansiData = generateIncrementalUpdate(from: previous, to: snapshot)
+                ansiData = generateIncrementalUpdate(from: previous, to: adjustedSnapshot)
                 logger.verbose("Incremental update performed")
             } else {
                 // Fallback to full redraw if somehow previousSnapshot is nil
-                ansiData = convertBufferToOptimizedANSI(snapshot, clearScreen: false)
+                ansiData = convertBufferToOptimizedANSI(adjustedSnapshot, clearScreen: false)
                 logger.verbose("Fallback full redraw performed")
             }
 
             // Store current snapshot for next update
-            previousSnapshot = snapshot
+            previousSnapshot = adjustedSnapshot
 
             // Feed the ANSI data to the terminal
             if !ansiData.isEmpty {
+                // Log what we're about to send
+                let preview = String(ansiData.prefix(200))
+                logger.info("🔤 Sending ANSI data (\(ansiData.count) bytes): \(preview.debugDescription)")
                 feedData(ansiData)
+            } else {
+                logger.warning("⚠️ No ANSI data to send - buffer may be empty")
             }
+
+            // Log successful update
+            logger.verbose("✅ Buffer update completed successfully")
         }
 
         /// Handle viewport scrolling
@@ -264,7 +354,8 @@ struct TerminalHostingView: UIViewRepresentable {
                 // Clear screen and reset cursor for first update
                 output += "\u{001B}[2J\u{001B}[H"
             } else {
-                // Just reset cursor to home position
+                // For non-first updates, just home the cursor without clearing
+                // This allows us to overwrite content line by line
                 output += "\u{001B}[H"
             }
 
@@ -275,13 +366,15 @@ struct TerminalHostingView: UIViewRepresentable {
 
             // Render each row
             for (rowIndex, row) in snapshot.cells.enumerated() {
+                // Don't use absolute positioning for each line - just use newlines
                 if rowIndex > 0 {
                     output += "\r\n"
                 }
-
+                
                 // Check if this is an empty row (marked by empty array or single empty cell)
                 if row.isEmpty || (row.count == 1 && row[0].width == 0) {
-                    // Skip rendering empty rows - terminal will show blank line
+                    // For empty rows, output a clear line to ensure no stale content
+                    output += "\u{001B}[K"
                     continue
                 }
 
@@ -369,11 +462,20 @@ struct TerminalHostingView: UIViewRepresentable {
                 }
             }
 
+            // Don't clear remaining rows - the buffer should handle its own viewport
+            // The server sends the visible area, and we shouldn't assume what's below
+
             // Reset attributes
             output += "\u{001B}[0m"
 
-            // Position cursor
-            output += "\u{001B}[\(snapshot.cursorY + 1);\(snapshot.cursorX + 1)H"
+            // Position cursor (ensure it's within actual buffer bounds)
+            // The cursor should be positioned within the buffer area, not beyond it
+            let maxRow = max(1, snapshot.rows) // Ensure at least row 1
+            let cursorRow = max(1, min(snapshot.cursorY + 1, maxRow))
+            let cursorCol = max(1, snapshot.cursorX + 1)
+            
+            
+            output += "\u{001B}[\(cursorRow);\(cursorCol)H"
 
             return output
         }
@@ -520,7 +622,11 @@ struct TerminalHostingView: UIViewRepresentable {
 
             // Update cursor position if changed
             if cursorChanged {
-                output += "\u{001B}[\(newSnapshot.cursorY + 1);\(newSnapshot.cursorX + 1)H"
+                // Ensure cursor is within bounds
+                let maxRow = max(1, newSnapshot.rows)
+                let cursorRow = max(1, min(newSnapshot.cursorY + 1, maxRow))
+                let cursorCol = max(1, newSnapshot.cursorX + 1)
+                output += "\u{001B}[\(cursorRow);\(cursorCol)H"
             }
 
             return output
@@ -575,19 +681,45 @@ struct TerminalHostingView: UIViewRepresentable {
         func feedData(_ data: String) {
             Task { @MainActor in
                 guard let terminal else {
-                    logger.warning("No terminal instance available")
+                    logger.warning("❌ feedData: No terminal instance available")
                     return
                 }
 
-                // Debug: Log first 100 chars of data
-                let preview = String(data.prefix(100))
-                logger.verbose("Feeding \(data.count) bytes: \(preview)")
+                // Check if this looks like initial content
+                let hasVisibleContent = data.contains { char in
+                    !char.isWhitespace && !char.isNewline && char != "\u{001B}"
+                }
+
+                if hasVisibleContent && isFirstUpdate {
+                    isFirstUpdate = false
+                }
+
+                // Enhanced logging
+                let preview = String(data.prefix(200))
+                if hasVisibleContent {
+                    logger.info("   Preview: \(preview.debugDescription)")
+                }
 
                 // Store current scroll position before feeding data
                 let wasAtBottom = viewModel.isAutoScrollEnabled
 
                 // Feed the output to the terminal
                 terminal.feed(text: data)
+                
+                // Simplified display refresh - let SwiftTerm handle most of the work
+                terminal.setNeedsDisplay()
+                
+                // Only use the display link for critical updates
+                if hasVisibleContent {
+                    // self.startShortDisplayRefresh()  // TEMPORARILY DISABLED FOR TESTING                                │ │
+                }
+                
+                // Log what the terminal shows after feeding
+                let terminalContent = getBufferContent() ?? "<empty>"
+                let lines = terminalContent.split(separator: "\n", maxSplits: 5, omittingEmptySubsequences: false)
+                for (index, line) in lines.prefix(5).enumerated() {
+                    logger.info("   Line \(index): \(String(line).prefix(80))")
+                }
 
                 // Auto-scroll to bottom if enabled
                 if wasAtBottom {
@@ -597,25 +729,59 @@ struct TerminalHostingView: UIViewRepresentable {
             }
         }
 
+        private func startShortDisplayRefresh() {
+            // Refresh for ~10 frames to ensure paints commit
+            displayLink?.invalidate()
+            displayLinkFramesRemaining = 10
+
+            let link = CADisplayLink(target: self, selector: #selector(handleDisplayLink))
+            link.add(to: .main, forMode: .common)
+            displayLink = link
+            logger.debug("🪄 Started short display refresh link")
+        }
+
+        @objc private func handleDisplayLink() {
+            guard let terminal else { return }
+            terminal.setNeedsDisplay()
+            terminal.layer.setNeedsDisplay()
+            CATransaction.flush()
+
+            displayLinkFramesRemaining -= 1
+            if displayLinkFramesRemaining <= 0 {
+                displayLink?.invalidate()
+                displayLink = nil
+                logger.debug("🪄 Stopped short display refresh link")
+            }
+        }
+
         func getBufferContent() -> String? {
             guard let terminal else { return nil }
 
             // Get the terminal buffer content
             let terminalInstance = terminal.getTerminal()
             var content = ""
+            var nonEmptyLines = 0
 
             // Read all lines from the terminal buffer
-            for row in 0..<terminalInstance.rows {
+            for row in 0..<min(10, terminalInstance.rows) { // Only check first 10 lines for debugging
                 if let line = terminalInstance.getLine(row: row) {
                     var lineText = ""
                     for col in 0..<terminalInstance.cols where col < line.count {
                         let char = line[col]
                         lineText += String(char.getCharacter())
                     }
-                    // Trim trailing spaces
-                    content += lineText.trimmingCharacters(in: .whitespaces) + "\n"
+                    let trimmed = lineText.trimmingCharacters(in: .whitespaces)
+                    if !trimmed.isEmpty {
+                        nonEmptyLines += 1
+                        logger.verbose("Row \(row): '\(trimmed.prefix(50))'")
+                    }
+                    // Don't trim for content - preserve exact spacing
+                    content += lineText + "\n"
                 }
             }
+
+            logger
+                .info("📄 Buffer content check: \(nonEmptyLines) non-empty lines out of \(terminalInstance.rows) total")
 
             return content.trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -629,7 +795,17 @@ struct TerminalHostingView: UIViewRepresentable {
         }
 
         func sizeChanged(source: SwiftTerm.TerminalView, newCols: Int, newRows: Int) {
-            onResize(newCols, newRows)
+            // Ignore obviously invalid/ephemeral sizes during layout churn
+            guard newCols >= 10, newRows >= 5 else {
+                return
+            }
+
+            // Only notify if dimensions actually changed
+            if newCols != viewModel.terminalCols || newRows != viewModel.terminalRows {
+                onResize(newCols, newRows)
+            } else {
+                logger.debug("   Skipping resize callback - dimensions unchanged")
+            }
         }
 
         func scrolled(source: SwiftTerm.TerminalView, position: Double) {

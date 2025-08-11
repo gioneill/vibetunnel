@@ -598,6 +598,12 @@ final class BunServer {
                 throw BunServerError.processFailedToStart
             }
 
+            try await Task.sleep(for: .milliseconds(2000)) // Give more time for web server startup
+            
+            // Check if control socket was created (indicates web server is running)
+            let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
+            let controlSocketPath = "\(homeDir)/.vibetunnel/control.sock"
+            let socketExists = FileManager.default.fileExists(atPath: controlSocketPath)
             // Mark server as running only after successful start
             state = .running
 

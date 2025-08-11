@@ -55,6 +55,26 @@ struct TerminalView: View {
         .onAppear {
             viewModel.connect()
             isInputFocused = true
+            
+            // Load saved terminal width preference
+            let savedWidth = TerminalWidthManager.shared.defaultWidth
+            if savedWidth > 0 {
+                currentTerminalWidth = TerminalWidth.from(value: savedWidth)
+                selectedTerminalWidth = savedWidth
+                viewModel.setMaxWidth(savedWidth)
+                logger.info("📐 Restored saved terminal width: \(savedWidth)")
+            } else {
+                // Default to unlimited if no saved preference
+                currentTerminalWidth = .unlimited
+                selectedTerminalWidth = nil
+                // For unlimited, calculate optimal width
+                let screenWidth = UIScreen.main.bounds.width
+                let padding: CGFloat = 32
+                let charWidth: CGFloat = 9
+                let optimalCols = Int((screenWidth - padding) / charWidth)
+                viewModel.resize(cols: optimalCols, rows: viewModel.terminalRows)
+                logger.info("📐 No saved width, using unlimited with optimal cols: \(optimalCols)")
+            }
         }
         .onDisappear {
             viewModel.disconnect()
@@ -91,6 +111,7 @@ struct TerminalView: View {
                 }
             )
         }
+        .persistentSystemOverlays(.hidden)
         .sheet(isPresented: $showingFullscreenInput) {
             FullscreenTextInput(isPresented: $showingFullscreenInput) { [weak viewModel] text in
                 viewModel?.sendInput(text)
@@ -129,10 +150,23 @@ struct TerminalView: View {
             }
         }
         .onChange(of: selectedTerminalWidth) { _, newValue in
-            if let width = newValue, width != viewModel.terminalCols {
-                let aspectRatio = Double(viewModel.terminalRows) / Double(viewModel.terminalCols)
-                let newHeight = Int(Double(width) * aspectRatio)
-                viewModel.resize(cols: width, rows: newHeight)
+            if let width = newValue {
+                // Explicit width selected
+                if width != viewModel.terminalCols {
+                    logger.info("📐 Width preference changed to \(width), keeping height at \(viewModel.terminalRows)")
+                    viewModel.resize(cols: width, rows: viewModel.terminalRows)
+                }
+            } else {
+                // Infinite width selected (nil)
+                let screenWidth = UIScreen.main.bounds.width
+                let padding: CGFloat = 32
+                let charWidth: CGFloat = 9
+                let optimalCols = Int((screenWidth - padding) / charWidth)
+                
+                if optimalCols != viewModel.terminalCols {
+                    logger.info("📐 Infinite width selected, using optimal cols: \(optimalCols), keeping height at \(viewModel.terminalRows)")
+                    viewModel.resize(cols: optimalCols, rows: viewModel.terminalRows)
+                }
             }
         }
         .onChange(of: currentTerminalWidth) { _, newWidth in
@@ -604,6 +638,7 @@ struct TerminalView: View {
             }
             .id(viewModel.terminalViewId)
             .background(selectedTheme.background)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .focused($isInputFocused)
             .overlay(
                 ScrollToBottomButton(
@@ -654,6 +689,13 @@ class TerminalViewModel {
     var isAtBottom = true
     var fitToWidth = false
 
+    // Buffer queueing for coordinator initialization race condition
+    private var pendingBufferUpdates: [TerminalHostingView.BufferSnapshot] = []
+    private var isCoordinatorReady = false
+    private var coordinatorReadyTime: Date?
+    private var firstBufferArrivalTime: Date?
+    private var bufferUpdateCount = 0
+
     let session: Session
     let castRecorder: CastRecorder
     let bufferWebSocketClient: BufferWebSocketClient
@@ -701,17 +743,23 @@ class TerminalViewModel {
         connectionStatusTask?.cancel()
         connectionStatusTask = Task { [weak self] in
             guard let self else { return }
+            var lastConnectedState: Bool? = nil
             while !Task.isCancelled {
                 let connected = self.bufferWebSocketClient.isConnected
-                await MainActor.run {
-                    self.isConnecting = false
-                    self.isConnected = connected
-                    if !connected {
-                        self.errorMessage = "WebSocket disconnected"
-                    } else {
-                        self.errorMessage = nil
+
+                if connected != lastConnectedState {
+                    lastConnectedState = connected
+                    await MainActor.run {
+                        self.isConnecting = false
+                        self.isConnected = connected
+                        if !connected {
+                            self.errorMessage = "WebSocket disconnected"
+                        } else {
+                            self.errorMessage = nil
+                        }
                     }
                 }
+
                 try? await Task.sleep(nanoseconds: 500_000_000) // Check every 0.5 seconds
             }
         }
@@ -720,13 +768,18 @@ class TerminalViewModel {
         connectionErrorTask?.cancel()
         connectionErrorTask = Task { [weak self] in
             guard let self else { return }
+            var lastError: String? = nil
             while !Task.isCancelled {
-                if let error = self.bufferWebSocketClient.connectionError {
+                let currentError = self.bufferWebSocketClient.connectionError?.localizedDescription
+
+                if currentError != lastError {
+                    lastError = currentError
                     await MainActor.run {
-                        self.errorMessage = error.localizedDescription
+                        self.errorMessage = currentError
                         self.isConnecting = false
                     }
                 }
+
                 try? await Task.sleep(nanoseconds: 500_000_000) // Check every 0.5 seconds
             }
         }
@@ -745,11 +798,11 @@ class TerminalViewModel {
     private func handleWebSocketEvent(_ event: TerminalWebSocketEvent) {
         switch event {
         case .header(let width, let height):
-            // Initial terminal setup
-            logger.info("Terminal initialized: \(width)x\(height)")
+            // Initial terminal setup - these are the server's actual PTY dimensions
+            logger.info("📊 Server reported terminal dimensions: \(width)×\(height)")
             terminalCols = width
             terminalRows = height
-        // The terminal will be resized when created
+            // The terminal view will use these dimensions when created
 
         case .output(_, let data):
             // Feed output data directly to the terminal
@@ -798,29 +851,48 @@ class TerminalViewModel {
             // Session has exited - no need to load additional content
 
         case .bufferUpdate(let snapshot):
-            // Update terminal buffer directly
-            if let coordinator = terminalCoordinator as? TerminalHostingView.Coordinator {
-                coordinator.updateBuffer(from: TerminalHostingView.BufferSnapshot(
-                    cols: snapshot.cols,
-                    rows: snapshot.rows,
-                    viewportY: snapshot.viewportY,
-                    cursorX: snapshot.cursorX,
-                    cursorY: snapshot.cursorY,
-                    cells: snapshot.cells.map { row in
-                        row.map { cell in
-                            TerminalHostingView.BufferCell(
-                                char: cell.char,
-                                width: cell.width,
-                                fg: cell.fg,
-                                bg: cell.bg,
-                                attributes: cell.attributes
-                            )
-                        }
+            bufferUpdateCount += 1
+
+            // Track timing for diagnostics
+            if firstBufferArrivalTime == nil {
+                firstBufferArrivalTime = Date()
+            }
+
+            // Convert to TerminalHostingView.BufferSnapshot
+            let terminalSnapshot = TerminalHostingView.BufferSnapshot(
+                cols: snapshot.cols,
+                rows: snapshot.rows,
+                viewportY: snapshot.viewportY,
+                cursorX: snapshot.cursorX,
+                cursorY: snapshot.cursorY,
+                cells: snapshot.cells.map { row in
+                    row.map { cell in
+                        TerminalHostingView.BufferCell(
+                            char: cell.char,
+                            width: cell.width,
+                            fg: cell.fg,
+                            bg: cell.bg,
+                            attributes: cell.attributes
+                        )
                     }
-                ))
+                }
+            )
+
+            // Check if coordinator is ready
+            if let coordinator = terminalCoordinator as? TerminalHostingView.Coordinator, isCoordinatorReady {
+                coordinator.updateBuffer(from: terminalSnapshot)
             } else {
-                // Fallback: buffer updates not available yet
-                logger.warning("Direct buffer update not available")
+                // Queue the update
+                pendingBufferUpdates.append(terminalSnapshot)
+                logger
+                    .warning(
+                        "⏳ Buffer update #\(bufferUpdateCount): Coordinator not ready, queuing (queue size: \(pendingBufferUpdates.count))"
+                    )
+
+                // Try to set up coordinator if it's nil
+                if terminalCoordinator == nil {
+                    logger.error("❌ Coordinator is completely nil - this shouldn't happen!")
+                }
             }
 
         case .bell:
@@ -862,11 +934,19 @@ class TerminalViewModel {
 
         // Handle initial resize with proper synchronization
         if !hasPerformedInitialResize && !isPerformingInitialResize {
+            // Check if dimensions are different from what we already have
+            // to prevent duplicate initial resizes with same dimensions
+            if terminalCols == cols && terminalRows == rows {
+                logger.debug("Skipping duplicate initial resize: \(cols)x\(rows)")
+                return
+            }
+
             isPerformingInitialResize = true
 
             // Always update UI dimensions immediately for consistency
             terminalCols = cols
             terminalRows = rows
+
 
             // Perform initial resize after a short delay to let layout settle
             resizeDebounceTask?.cancel()
@@ -1036,18 +1116,39 @@ class TerminalViewModel {
     func setMaxWidth(_ maxWidth: Int) {
         // Store the max width preference
         // When maxWidth is 0, it means unlimited
-        let targetWidth = maxWidth == 0 ? nil : maxWidth
-
-        if let width = targetWidth, width != terminalCols {
-            // Maintain aspect ratio when changing width
-            let aspectRatio = Double(terminalRows) / Double(terminalCols)
-            let newHeight = Int(Double(width) * aspectRatio)
-            resize(cols: width, rows: newHeight)
+        
+        if maxWidth == 0 {
+            // For unlimited width, calculate optimal width based on screen
+            let screenWidth = UIScreen.main.bounds.width
+            let padding: CGFloat = 32 // Account for UI padding
+            let charWidth: CGFloat = 9 // Approximate character width
+            let optimalCols = Int((screenWidth - padding) / charWidth)
+            
+            resize(cols: optimalCols, rows: terminalRows)
+        } else if maxWidth != terminalCols {
+            // Use the specified width
+            resize(cols: maxWidth, rows: terminalRows)
         }
 
-        // Update the terminal coordinator if using constrained width
+        // Update the terminal coordinator
         if let coordinator = terminalCoordinator as? TerminalHostingView.Coordinator {
             coordinator.setMaxWidth(maxWidth)
+        }
+    }
+
+    /// Called when the terminal coordinator is fully initialized and ready
+    func notifyCoordinatorReady() {
+        coordinatorReadyTime = Date()
+        isCoordinatorReady = true
+
+        // Process all pending updates
+        if !pendingBufferUpdates.isEmpty {
+            if let coordinator = terminalCoordinator as? TerminalHostingView.Coordinator {
+                for (_, snapshot) in pendingBufferUpdates.enumerated() {
+                    coordinator.updateBuffer(from: snapshot)
+                }
+            }
+            pendingBufferUpdates.removeAll()
         }
     }
 }

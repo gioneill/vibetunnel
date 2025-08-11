@@ -46,7 +46,7 @@ final class DevServerManager: ObservableObject {
     /// Checks if pnpm is installed on the system
     private func isPnpmInstalled() -> Bool {
         // Common locations where pnpm might be installed
-        let commonPaths = [
+        var commonPaths = [
             "/usr/local/bin/pnpm",
             "/opt/homebrew/bin/pnpm",
             "/usr/bin/pnpm",
@@ -54,6 +54,20 @@ final class DevServerManager: ObservableObject {
             NSString("~/.local/share/pnpm/pnpm").expandingTildeInPath,
             NSString("~/Library/Caches/fnm_multishells/*/bin/pnpm").expandingTildeInPath
         ]
+        
+        // Add nvm paths - check all installed node versions
+        let nvmPath = NSString("~/.nvm/versions/node").expandingTildeInPath
+        if FileManager.default.fileExists(atPath: nvmPath) {
+            do {
+                let nodeVersions = try FileManager.default.contentsOfDirectory(atPath: nvmPath)
+                for version in nodeVersions {
+                    let pnpmPath = "\(nvmPath)/\(version)/bin/pnpm"
+                    commonPaths.append(pnpmPath)
+                }
+            } catch {
+                logger.debug("Could not enumerate nvm node versions: \(error)")
+            }
+        }
 
         // Check common paths first
         for path in commonPaths where FileManager.default.isExecutableFile(atPath: path) {
@@ -128,13 +142,27 @@ final class DevServerManager: ObservableObject {
     /// Finds the path to pnpm executable
     func findPnpmPath() -> String? {
         // Common locations where pnpm might be installed
-        let commonPaths = [
+        var commonPaths = [
             "/usr/local/bin/pnpm",
             "/opt/homebrew/bin/pnpm",
             "/usr/bin/pnpm",
             NSString("~/Library/pnpm/pnpm").expandingTildeInPath,
             NSString("~/.local/share/pnpm/pnpm").expandingTildeInPath
         ]
+        
+        // Add nvm paths - check all installed node versions
+        let nvmPath = NSString("~/.nvm/versions/node").expandingTildeInPath
+        if FileManager.default.fileExists(atPath: nvmPath) {
+            do {
+                let nodeVersions = try FileManager.default.contentsOfDirectory(atPath: nvmPath)
+                for version in nodeVersions {
+                    let pnpmPath = "\(nvmPath)/\(version)/bin/pnpm"
+                    commonPaths.append(pnpmPath)
+                }
+            } catch {
+                logger.debug("Could not enumerate nvm node versions: \(error)")
+            }
+        }
 
         // Check common paths first
         for path in commonPaths where FileManager.default.isExecutableFile(atPath: path) {

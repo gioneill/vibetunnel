@@ -139,6 +139,8 @@ struct TerminalWidthSheet: View {
                                     }
                                 }
                                 .padding()
+                                .frame(maxWidth: .infinity)
+                                .contentShape(Rectangle())
                                 .background(
                                     RoundedRectangle(cornerRadius: Theme.CornerRadius.medium)
                                         .fill(selectedWidth == preset.columns
@@ -243,6 +245,8 @@ struct TerminalWidthSheet: View {
                                         .foregroundColor(Theme.Colors.terminalForeground.opacity(0.5))
                                 }
                                 .padding()
+                                .frame(maxWidth: .infinity)
+                                .contentShape(Rectangle())
                                 .background(
                                     RoundedRectangle(cornerRadius: Theme.CornerRadius.medium)
                                         .fill(Theme.Colors.cardBorder.opacity(0.1))
