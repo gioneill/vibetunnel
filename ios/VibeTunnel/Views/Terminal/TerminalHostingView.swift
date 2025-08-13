@@ -70,11 +70,11 @@ struct TerminalHostingView: UIViewRepresentable {
         // Always honor server's row count as it knows the actual terminal environment
         let serverRows = viewModel.terminalRows > 0 ? viewModel.terminalRows : 24
         let serverCols = viewModel.terminalCols > 0 ? viewModel.terminalCols : 80
-        
+
         // For width: use screen-based calculation as default (will be overridden by user preference if set)
         let screenBasedCols = Int(UIScreen.main.bounds.width / 9) // Approximate char width
         let cols = viewModel.terminalCols > 0 ? serverCols : screenBasedCols
-        let rows = serverRows  // Always use server's row count when available
+        let rows = serverRows // Always use server's row count when available
         terminal.resize(cols: cols, rows: rows)
 
         // Provide terminal instance to coordinator early to avoid races
@@ -200,41 +200,46 @@ struct TerminalHostingView: UIViewRepresentable {
             }
 
             logger.info("🧵 updateBuffer on main thread: \(Thread.isMainThread)")
-            
+
             // Get the actual terminal dimensions (what iOS can display)
             let terminalRows = terminal.getTerminal().rows
-            
+
             // Apply viewport windowing if server sent more rows than we can display
             var adjustedSnapshot = snapshot
             if snapshot.rows > terminalRows {
-                logger.info("📐 Windowing: server sent \(snapshot.rows) rows, terminal shows \(terminalRows) rows, cursor at row \(snapshot.cursorY)")
-                
+                logger
+                    .info(
+                        "📐 Windowing: server sent \(snapshot.rows) rows, terminal shows \(terminalRows) rows, cursor at row \(snapshot.cursorY)"
+                    )
+
                 // Calculate the visible window to keep cursor in view
                 let cursorRow = snapshot.cursorY
                 let halfHeight = terminalRows / 2
-                
-                let visibleStart: Int
-                if cursorRow < halfHeight {
+
+                let visibleStart: Int = if cursorRow < halfHeight {
                     // Cursor near top - show from beginning
-                    visibleStart = 0
+                    0
                 } else if cursorRow >= snapshot.rows - halfHeight {
                     // Cursor near bottom - show last rows
-                    visibleStart = max(0, snapshot.rows - terminalRows)
+                    max(0, snapshot.rows - terminalRows)
                 } else {
                     // Cursor in middle - center window around cursor
-                    visibleStart = cursorRow - halfHeight
+                    cursorRow - halfHeight
                 }
-                
+
                 let visibleEnd = min(visibleStart + terminalRows, snapshot.rows)
-                
+
                 // Extract only the visible cells
                 let visibleCells = Array(snapshot.cells[visibleStart..<visibleEnd])
-                
+
                 // Adjust cursor position relative to visible window
                 let adjustedCursorY = cursorRow - visibleStart
-                
-                logger.info("📐 Window: showing rows \(visibleStart)-\(visibleEnd-1), cursor at local row \(adjustedCursorY)")
-                
+
+                logger
+                    .info(
+                        "📐 Window: showing rows \(visibleStart)-\(visibleEnd - 1), cursor at local row \(adjustedCursorY)"
+                    )
+
                 // Create adjusted snapshot with windowed data
                 adjustedSnapshot = BufferSnapshot(
                     cols: snapshot.cols,
@@ -275,7 +280,10 @@ struct TerminalHostingView: UIViewRepresentable {
 
             let dimensionsMismatch = currentCols != adjustedSnapshot.cols || currentRows != adjustedSnapshot.rows
             if dimensionsMismatch {
-                logger.debug("📐 Dimension info - Terminal: \(currentCols)x\(currentRows), Buffer: \(adjustedSnapshot.cols)x\(adjustedSnapshot.rows)")
+                logger
+                    .debug(
+                        "📐 Dimension info - Terminal: \(currentCols)x\(currentRows), Buffer: \(adjustedSnapshot.cols)x\(adjustedSnapshot.rows)"
+                    )
                 // Don't resize here - let the UI-driven resize handle terminal dimensions
                 // Just render the buffer content as-is
                 // We'll force a full redraw below but NOT clear the screen
@@ -292,7 +300,10 @@ struct TerminalHostingView: UIViewRepresentable {
                 let wasFirstUpdate = isFirstUpdate
                 ansiData = convertBufferToOptimizedANSI(adjustedSnapshot, clearScreen: isFirstUpdate)
                 isFirstUpdate = false
-                logger.verbose("Full redraw performed (wasFirstUpdate: \(wasFirstUpdate), dimensionsMismatch: \(dimensionsMismatch))")
+                logger
+                    .verbose(
+                        "Full redraw performed (wasFirstUpdate: \(wasFirstUpdate), dimensionsMismatch: \(dimensionsMismatch))"
+                    )
             } else if let previous = previousSnapshot {
                 // Incremental update
                 ansiData = generateIncrementalUpdate(from: previous, to: adjustedSnapshot)
@@ -370,7 +381,7 @@ struct TerminalHostingView: UIViewRepresentable {
                 if rowIndex > 0 {
                     output += "\r\n"
                 }
-                
+
                 // Check if this is an empty row (marked by empty array or single empty cell)
                 if row.isEmpty || (row.count == 1 && row[0].width == 0) {
                     // For empty rows, output a clear line to ensure no stale content
@@ -473,8 +484,7 @@ struct TerminalHostingView: UIViewRepresentable {
             let maxRow = max(1, snapshot.rows) // Ensure at least row 1
             let cursorRow = max(1, min(snapshot.cursorY + 1, maxRow))
             let cursorCol = max(1, snapshot.cursorX + 1)
-            
-            
+
             output += "\u{001B}[\(cursorRow);\(cursorCol)H"
 
             return output
@@ -705,15 +715,16 @@ struct TerminalHostingView: UIViewRepresentable {
 
                 // Feed the output to the terminal
                 terminal.feed(text: data)
-                
+
                 // Simplified display refresh - let SwiftTerm handle most of the work
                 terminal.setNeedsDisplay()
-                
+
                 // Only use the display link for critical updates
                 if hasVisibleContent {
-                    // self.startShortDisplayRefresh()  // TEMPORARILY DISABLED FOR TESTING                                │ │
+                    // self.startShortDisplayRefresh()  // TEMPORARILY DISABLED FOR TESTING                             
+                    //   │ │
                 }
-                
+
                 // Log what the terminal shows after feeding
                 let terminalContent = getBufferContent() ?? "<empty>"
                 let lines = terminalContent.split(separator: "\n", maxSplits: 5, omittingEmptySubsequences: false)

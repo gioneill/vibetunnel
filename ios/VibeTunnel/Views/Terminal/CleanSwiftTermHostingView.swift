@@ -1,0 +1,325 @@
+import os
+import SwiftTerm
+import SwiftUI
+
+private let logger = Logger(category: "CleanSwiftTermHost")
+
+struct CleanSwiftTermHostingView: UIViewRepresentable {
+    var viewModel: TerminalViewModel
+
+    // MARK: - Coordinator
+
+    class Coordinator: NSObject, TerminalViewDelegate {
+        let parent: CleanSwiftTermHostingView
+        var lastBufferUpdate: Date = Date()
+
+        init(_ parent: CleanSwiftTermHostingView) {
+            self.parent = parent
+            super.init()
+        }
+
+        // MARK: TerminalViewDelegate
+
+        func send(source: SwiftTerm.TerminalView, data: ArraySlice<UInt8>) {
+            // Forward input to the server (dispatch on main without capturing self)
+            logger.debug("Sending \(data.count) bytes to server")
+            let bytes = Array(data)
+            let viewModel = parent.viewModel
+            DispatchQueue.main.async {
+                if let string = String(bytes: bytes, encoding: .utf8) {
+                    viewModel.sendInput(string)
+                }
+            }
+        }
+
+        func sizeChanged(source: SwiftTerm.TerminalView, newCols: Int, newRows: Int) {
+            // Notify server of terminal size change
+            logger.info("Terminal resized to \(newCols)x\(newRows)")
+            let viewModel = parent.viewModel
+            DispatchQueue.main.async {
+                viewModel.resize(cols: newCols, rows: newRows)
+            }
+        }
+
+        func scrolled(source: SwiftTerm.TerminalView, position: Double) {
+            // Update scroll position
+            let viewModel = parent.viewModel
+            DispatchQueue.main.async {
+                let isAtBottom = position >= 0.95
+                viewModel.updateScrollState(isAtBottom: isAtBottom)
+            }
+        }
+
+        func setTerminalTitle(source: SwiftTerm.TerminalView, title: String) {
+            // Update terminal title if needed
+            logger.debug("Terminal title set: \(title)")
+        }
+
+        func clipboardCopy(source: SwiftTerm.TerminalView, content: Data) {
+            // Handle clipboard copy
+            if let str = String(data: content, encoding: .utf8) {
+                UIPasteboard.general.string = str
+                logger.debug("Copied \(str.count) characters to clipboard")
+            }
+        }
+
+        func rangeChanged(source: SwiftTerm.TerminalView, startY: Int, endY: Int) {
+            // Track buffer changes if needed for debugging
+            logger.debug("Buffer changed from row \(startY) to \(endY)")
+        }
+
+        func hostCurrentDirectoryUpdate(source: SwiftTerm.TerminalView, directory: String?) {
+            // Handle current directory updates
+            if let dir = directory {
+                logger.debug("Current directory: \(dir)")
+            }
+        }
+
+        func requestOpenLink(source: SwiftTerm.TerminalView, link: String, params: [String: String]) {
+            // Handle link opening requests
+            if let url = URL(string: link) {
+                DispatchQueue.main.async {
+                    UIApplication.shared.open(url)
+                }
+            }
+        }
+    }
+
+    // MARK: - UIViewRepresentable
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeUIView(context: Context) -> CleanSwiftTermView {
+        logger.info("Creating CleanSwiftTermView")
+
+        let terminalView = CleanSwiftTermView(frame: .zero)
+
+        // Set the delegate through coordinator
+        terminalView.terminalDelegate = context.coordinator
+
+        // Apply theme if available
+        applyTheme(to: terminalView)
+
+        // Ensure keyboard input works
+        _ = terminalView.becomeFirstResponder()
+
+        // Set up buffer update handling
+        setupBufferUpdates(for: terminalView, coordinator: context.coordinator)
+
+        // Initial size setup
+        if viewModel.terminalCols > 0 && viewModel.terminalRows > 0 {
+            terminalView.resize(cols: viewModel.terminalCols, rows: viewModel.terminalRows)
+        }
+
+        return terminalView
+    }
+
+    func updateUIView(_ uiView: CleanSwiftTermView, context: Context) {
+        // Handle state changes only, not data feeding
+        // Data is fed through the subscription set up in makeUIView
+
+        // Update focus state if needed
+        if viewModel.shouldBecomeFirstResponder {
+            _ = uiView.becomeFirstResponder()
+        }
+
+        // Update theme if changed
+        if viewModel.themeChanged {
+            applyTheme(to: uiView)
+        }
+    }
+
+    // MARK: - Helper Methods
+
+    private func setupBufferUpdates(for terminalView: CleanSwiftTermView, coordinator: Coordinator) {
+        // Subscribe to buffer updates
+        viewModel
+            .onBufferUpdateClean =
+            { [weak terminalView, weak coordinator] (snapshot: TerminalHostingView.BufferSnapshot) in
+                guard let terminalView else { return }
+
+                // Rate limiting check
+                let now = Date()
+                if let lastUpdate = coordinator?.lastBufferUpdate,
+                   now.timeIntervalSince(lastUpdate) < 0.016
+                { // ~60fps max
+                    return
+                }
+                coordinator?.lastBufferUpdate = now
+
+                // Convert buffer snapshot to ANSI and feed to terminal
+                let ansiData = convertBufferToANSI(snapshot)
+
+                // Feed on main thread using TerminalView.feed, not getTerminal().feed
+                DispatchQueue.main.async {
+                    terminalView.feed(text: ansiData)
+                }
+            }
+    }
+
+    private func convertBufferToANSI(_ snapshot: TerminalHostingView.BufferSnapshot) -> String {
+        var output = ""
+
+        // Start sequence: hide cursor, reset attributes, clear screen
+        output += "\u{001B}[?25l" // Hide cursor (prevent flicker)
+        output += "\u{001B}[0m" // Reset all attributes
+        output += "\u{001B}[H" // Move cursor home
+        output += "\u{001B}[2J" // Clear entire screen
+
+        // Track attribute state to minimize escape sequences
+        var currentFg: Int? = nil
+        var currentBg: Int? = nil
+        var currentAttrs: Int = 0
+
+        // Process each row with explicit positioning
+        for (rowIndex, row) in snapshot.cells.enumerated() {
+            // Position cursor at start of line (1-based)
+            output += "\u{001B}[\(rowIndex + 1);1H"
+
+            // Process cells in row
+            if !row.isEmpty && !(row.count == 1 && row[0].char.isEmpty) {
+                for cell in row {
+                    // Handle attribute changes
+                    if let attrs = cell.attributes, attrs != currentAttrs {
+                        output += "\u{001B}[0m" // Reset all
+                        currentFg = nil
+                        currentBg = nil
+                        currentAttrs = attrs
+
+                        // Apply new attributes
+                        if (attrs & 0x01) != 0 { output += "\u{001B}[1m" } // Bold
+                        if (attrs & 0x02) != 0 { output += "\u{001B}[3m" } // Italic
+                        if (attrs & 0x04) != 0 { output += "\u{001B}[4m" } // Underline
+                        if (attrs & 0x08) != 0 { output += "\u{001B}[2m" } // Dim
+                        if (attrs & 0x10) != 0 { output += "\u{001B}[7m" } // Inverse
+                        if (attrs & 0x40) != 0 { output += "\u{001B}[9m" } // Strikethrough
+                    } else if cell.attributes == nil && currentAttrs != 0 {
+                        output += "\u{001B}[0m" // Reset if no attributes
+                        currentFg = nil
+                        currentBg = nil
+                        currentAttrs = 0
+                    }
+
+                    // Handle foreground color
+                    if cell.fg != currentFg {
+                        currentFg = cell.fg
+                        if let fg = cell.fg {
+                            if fg <= 255 {
+                                output += "\u{001B}[38;5;\(fg)m"
+                            }
+                            // Could add true color support here if needed
+                        } else {
+                            output += "\u{001B}[39m" // Default foreground
+                        }
+                    }
+
+                    // Handle background color
+                    if cell.bg != currentBg {
+                        currentBg = cell.bg
+                        if let bg = cell.bg {
+                            if bg <= 255 {
+                                output += "\u{001B}[48;5;\(bg)m"
+                            }
+                            // Could add true color support here if needed
+                        } else {
+                            output += "\u{001B}[49m" // Default background
+                        }
+                    }
+
+                    // Output the character (or space if empty)
+                    let char = cell.char.isEmpty ? " " : cell.char
+                    output += char
+                }
+            }
+
+            // Clear from cursor to end of line (removes any leftover content)
+            output += "\u{001B}[K"
+        }
+
+        // Belt-and-suspenders: clear everything below the last drawn row
+        output += "\u{001B}[J"
+
+        // Reset all attributes
+        output += "\u{001B}[0m"
+
+        // Position cursor at correct location (1-based coordinates)
+        let cursorRow = min(max(1, snapshot.cursorY + 1), snapshot.rows)
+        let cursorCol = min(max(1, snapshot.cursorX + 1), snapshot.cols)
+        output += "\u{001B}[\(cursorRow);\(cursorCol)H"
+
+        // Show cursor again
+        output += "\u{001B}[?25h"
+
+        return output
+    }
+
+    private func applyTheme(to terminalView: CleanSwiftTermView) {
+        // Apply theme colors
+        if let theme = viewModel.selectedTheme {
+            let foreground = UIColor(theme.foreground)
+            let background = UIColor(theme.background)
+            let cursor = UIColor(theme.cursor)
+
+            terminalView.applyTheme(
+                foreground: foreground,
+                background: background,
+                cursor: cursor
+            )
+
+            // Install ANSI colors (0-15: basic colors + bright variants)
+            let ansiColors = [
+                // Normal colors (0-7)
+                UIColor(theme.black),
+                UIColor(theme.red),
+                UIColor(theme.green),
+                UIColor(theme.yellow),
+                UIColor(theme.blue),
+                UIColor(theme.magenta),
+                UIColor(theme.cyan),
+                UIColor(theme.white),
+                // Bright colors (8-15) - use the same colors but lighter
+                UIColor(theme.brightBlack),
+                UIColor(theme.brightRed),
+                UIColor(theme.brightGreen),
+                UIColor(theme.brightYellow),
+                UIColor(theme.brightBlue),
+                UIColor(theme.brightMagenta),
+                UIColor(theme.brightCyan),
+                UIColor(theme.brightWhite)
+            ]
+
+            terminalView.installColorPalette(ansiColors)
+        }
+    }
+}
+
+// MARK: - UIColor Extension for Hex Colors
+
+extension UIColor {
+    fileprivate convenience init?(hex: String) {
+        let r, g, b: CGFloat
+
+        var hexColor = hex
+        if hexColor.hasPrefix("#") {
+            hexColor = String(hexColor.dropFirst())
+        }
+
+        if hexColor.count == 6 {
+            let scanner = Scanner(string: hexColor)
+            var hexNumber: UInt64 = 0
+
+            if scanner.scanHexInt64(&hexNumber) {
+                r = CGFloat((hexNumber & 0xFF0000) >> 16) / 255
+                g = CGFloat((hexNumber & 0x00FF00) >> 8) / 255
+                b = CGFloat(hexNumber & 0x0000FF) / 255
+
+                self.init(red: r, green: g, blue: b, alpha: 1)
+                return
+            }
+        }
+
+        return nil
+    }
+}

@@ -5,6 +5,7 @@ import Foundation
 enum TerminalRenderer: String, CaseIterable, Codable {
     case swiftTerm = "SwiftTerm"
     case xterm = "xterm.js"
+    case swiftTermClean = "SwiftTermClean"
 
     var displayName: String {
         switch self {
@@ -12,6 +13,8 @@ enum TerminalRenderer: String, CaseIterable, Codable {
             "SwiftTerm (Native)"
         case .xterm:
             "xterm.js (WebView)"
+        case .swiftTermClean:
+            "SwiftTerm (Clean)"
         }
     }
 
@@ -21,6 +24,8 @@ enum TerminalRenderer: String, CaseIterable, Codable {
             "Native Swift terminal emulator with best performance"
         case .xterm:
             "JavaScript-based terminal, identical to web version"
+        case .swiftTermClean:
+            "Minimal SwiftTerm implementation for debugging"
         }
     }
 

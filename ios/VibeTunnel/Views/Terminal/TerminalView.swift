@@ -634,6 +634,8 @@ struct TerminalView: View {
                         },
                         viewModel: viewModel
                     )
+                case .swiftTermClean:
+                    CleanSwiftTermHostingView(viewModel: viewModel)
                 }
             }
             .id(viewModel.terminalViewId)
@@ -695,6 +697,14 @@ class TerminalViewModel {
     private var coordinatorReadyTime: Date?
     private var firstBufferArrivalTime: Date?
     private var bufferUpdateCount = 0
+    
+    // Callback for clean SwiftTerm renderer
+    var onBufferUpdateClean: ((TerminalHostingView.BufferSnapshot) -> Void)?
+    
+    // Track theme changes
+    var themeChanged = false
+    var selectedTheme: TerminalTheme?
+    var shouldBecomeFirstResponder = false
 
     let session: Session
     let castRecorder: CastRecorder
@@ -878,7 +888,12 @@ class TerminalViewModel {
                 }
             )
 
-            // Check if coordinator is ready
+            // Send to clean renderer if callback is set
+            if let cleanCallback = onBufferUpdateClean {
+                cleanCallback(terminalSnapshot)
+            }
+            
+            // Check if coordinator is ready (for original SwiftTerm renderer)
             if let coordinator = terminalCoordinator as? TerminalHostingView.Coordinator, isCoordinatorReady {
                 coordinator.updateBuffer(from: terminalSnapshot)
             } else {
@@ -1149,6 +1164,41 @@ class TerminalViewModel {
                 }
             }
             pendingBufferUpdates.removeAll()
+        }
+    }
+    
+    func handleScroll(position: Double) {
+        // Update scroll state based on position
+        // Position is 0.0 at top, 1.0 at bottom
+        isAtBottom = position >= 0.95
+        if isAtBottom {
+            isAutoScrollEnabled = true
+        }
+    }
+    
+    func updateTerminalSize(cols: Int, rows: Int) {
+        // Update terminal dimensions and notify server
+        terminalCols = cols
+        terminalRows = rows
+        resize(cols: cols, rows: rows)
+    }
+    
+    func sendInput(_ data: Data) {
+        // Send raw data input to the server
+        Task {
+            do {
+                // Convert data to string and send
+                if let text = String(data: data, encoding: .utf8) {
+                    try await SessionService().sendInput(to: session.id, text: text)
+                } else {
+                    // If not UTF-8, try sending as base64 or handle binary data
+                    logger.warning("Non-UTF8 input data, sending as-is")
+                    let text = String(decoding: data, as: UTF8.self)
+                    try await SessionService().sendInput(to: session.id, text: text)
+                }
+            } catch {
+                logger.error("Failed to send input data: \(error)")
+            }
         }
     }
 }
