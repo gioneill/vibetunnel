@@ -134,124 +134,121 @@ struct CleanSwiftTermHostingView: UIViewRepresentable {
     // MARK: - Helper Methods
 
     private func setupBufferUpdates(for terminalView: CleanSwiftTermView, coordinator: Coordinator) {
-        // Subscribe to buffer updates
-        viewModel
-            .onBufferUpdateClean =
-            { [weak terminalView, weak coordinator] (snapshot: TerminalHostingView.BufferSnapshot) in
-                guard let terminalView else { return }
-
-                // Rate limiting check
-                let now = Date()
-                if let lastUpdate = coordinator?.lastBufferUpdate,
-                   now.timeIntervalSince(lastUpdate) < 0.016
-                { // ~60fps max
-                    return
-                }
-                coordinator?.lastBufferUpdate = now
-
-                // Convert buffer snapshot to ANSI and feed to terminal
-                let ansiData = convertBufferToANSI(snapshot)
-
-                // Feed on main thread using TerminalView.feed, not getTerminal().feed
-                DispatchQueue.main.async {
-                    terminalView.feed(text: ansiData)
-                }
+        // Subscribe to buffer updates and convert to ANSI
+        viewModel.onBufferUpdateClean = { [weak terminalView, weak coordinator] (snapshot: TerminalHostingView.BufferSnapshot) in
+            guard let terminalView else { return }
+            
+            // Rate limiting check (60fps max)
+            let now = Date()
+            if let lastUpdate = coordinator?.lastBufferUpdate,
+               now.timeIntervalSince(lastUpdate) < 0.016 { // ~60fps
+                return
             }
+            coordinator?.lastBufferUpdate = now
+            
+            // Convert buffer snapshot to ANSI
+            let ansiData = convertBufferToANSI(snapshot)
+            
+            // Feed to terminal on main thread
+            DispatchQueue.main.async {
+                terminalView.feed(text: ansiData)
+            }
+        }
     }
 
     private func convertBufferToANSI(_ snapshot: TerminalHostingView.BufferSnapshot) -> String {
         var output = ""
-
-        // Start sequence: hide cursor, reset attributes, clear screen
-        output += "\u{001B}[?25l" // Hide cursor (prevent flicker)
-        output += "\u{001B}[0m" // Reset all attributes
-        output += "\u{001B}[H" // Move cursor home
-        output += "\u{001B}[2J" // Clear entire screen
-
-        // Track attribute state to minimize escape sequences
-        var currentFg: Int? = nil
-        var currentBg: Int? = nil
-        var currentAttrs: Int = 0
-
-        // Process each row with explicit positioning
-        for (rowIndex, row) in snapshot.cells.enumerated() {
+        
+        // Start frame: hide cursor, reset, clear screen
+        output += "\u{001B}[?25l"  // Hide cursor (prevent flicker)
+        output += "\u{001B}[0m"     // Reset all attributes
+        output += "\u{001B}[H"      // Move cursor home
+        output += "\u{001B}[2J"     // Clear entire screen
+        
+        // Handle windowing if buffer is larger than visible area
+        let maxRows = min(snapshot.rows, 50) // Clamp to reasonable visible area
+        
+        // Process each visible row
+        for rowIndex in 0..<min(snapshot.cells.count, maxRows) {
             // Position cursor at start of line (1-based)
             output += "\u{001B}[\(rowIndex + 1);1H"
-
+            
+            let row = snapshot.cells[rowIndex]
+            
+            // Track current attributes for optimization
+            var currentFg: Int? = nil
+            var currentBg: Int? = nil
+            var currentAttrs: Int = 0
+            
             // Process cells in row
-            if !row.isEmpty && !(row.count == 1 && row[0].char.isEmpty) {
-                for cell in row {
-                    // Handle attribute changes
-                    if let attrs = cell.attributes, attrs != currentAttrs {
-                        output += "\u{001B}[0m" // Reset all
-                        currentFg = nil
-                        currentBg = nil
-                        currentAttrs = attrs
-
-                        // Apply new attributes
-                        if (attrs & 0x01) != 0 { output += "\u{001B}[1m" } // Bold
-                        if (attrs & 0x02) != 0 { output += "\u{001B}[3m" } // Italic
-                        if (attrs & 0x04) != 0 { output += "\u{001B}[4m" } // Underline
-                        if (attrs & 0x08) != 0 { output += "\u{001B}[2m" } // Dim
-                        if (attrs & 0x10) != 0 { output += "\u{001B}[7m" } // Inverse
-                        if (attrs & 0x40) != 0 { output += "\u{001B}[9m" } // Strikethrough
-                    } else if cell.attributes == nil && currentAttrs != 0 {
-                        output += "\u{001B}[0m" // Reset if no attributes
-                        currentFg = nil
-                        currentBg = nil
-                        currentAttrs = 0
-                    }
-
-                    // Handle foreground color
-                    if cell.fg != currentFg {
-                        currentFg = cell.fg
-                        if let fg = cell.fg {
-                            if fg <= 255 {
-                                output += "\u{001B}[38;5;\(fg)m"
-                            }
-                            // Could add true color support here if needed
-                        } else {
-                            output += "\u{001B}[39m" // Default foreground
-                        }
-                    }
-
-                    // Handle background color
-                    if cell.bg != currentBg {
-                        currentBg = cell.bg
-                        if let bg = cell.bg {
-                            if bg <= 255 {
-                                output += "\u{001B}[48;5;\(bg)m"
-                            }
-                            // Could add true color support here if needed
-                        } else {
-                            output += "\u{001B}[49m" // Default background
-                        }
-                    }
-
-                    // Output the character (or space if empty)
-                    let char = cell.char.isEmpty ? " " : cell.char
-                    output += char
+            for cell in row {
+                // Handle attribute changes
+                if let attrs = cell.attributes, attrs != currentAttrs {
+                    output += "\u{001B}[0m" // Reset
+                    currentFg = nil
+                    currentBg = nil
+                    currentAttrs = attrs
+                    
+                    // Apply text attributes
+                    if (attrs & 0x01) != 0 { output += "\u{001B}[1m" } // Bold
+                    if (attrs & 0x02) != 0 { output += "\u{001B}[3m" } // Italic
+                    if (attrs & 0x04) != 0 { output += "\u{001B}[4m" } // Underline
+                    if (attrs & 0x08) != 0 { output += "\u{001B}[2m" } // Dim
+                    if (attrs & 0x10) != 0 { output += "\u{001B}[7m" } // Inverse
+                    if (attrs & 0x40) != 0 { output += "\u{001B}[9m" } // Strikethrough
+                } else if cell.attributes == nil && currentAttrs != 0 {
+                    output += "\u{001B}[0m" // Reset if no attributes
+                    currentFg = nil
+                    currentBg = nil
+                    currentAttrs = 0
                 }
+                
+                // Handle foreground color
+                if cell.fg != currentFg {
+                    currentFg = cell.fg
+                    if let fg = cell.fg {
+                        if fg <= 255 {
+                            output += "\u{001B}[38;5;\(fg)m"
+                        }
+                    } else {
+                        output += "\u{001B}[39m" // Default foreground
+                    }
+                }
+                
+                // Handle background color
+                if cell.bg != currentBg {
+                    currentBg = cell.bg
+                    if let bg = cell.bg {
+                        if bg <= 255 {
+                            output += "\u{001B}[48;5;\(bg)m"
+                        }
+                    } else {
+                        output += "\u{001B}[49m" // Default background
+                    }
+                }
+                
+                // Output the character (or space if empty)
+                output += cell.char.isEmpty ? " " : cell.char
             }
-
-            // Clear from cursor to end of line (removes any leftover content)
+            
+            // Clear to end of line (removes any leftover content)
             output += "\u{001B}[K"
         }
-
-        // Belt-and-suspenders: clear everything below the last drawn row
+        
+        // Clear everything below last drawn row (belt-and-suspenders)
         output += "\u{001B}[J"
-
-        // Reset all attributes
+        
+        // Reset attributes
         output += "\u{001B}[0m"
-
-        // Position cursor at correct location (1-based coordinates)
-        let cursorRow = min(max(1, snapshot.cursorY + 1), snapshot.rows)
-        let cursorCol = min(max(1, snapshot.cursorX + 1), snapshot.cols)
+        
+        // Position cursor (1-based, clamped to visible area)
+        let cursorRow = min(max(1, snapshot.cursorY + 1), maxRows)
+        let cursorCol = max(1, snapshot.cursorX + 1)
         output += "\u{001B}[\(cursorRow);\(cursorCol)H"
-
-        // Show cursor again
+        
+        // Show cursor
         output += "\u{001B}[?25h"
-
+        
         return output
     }
 
