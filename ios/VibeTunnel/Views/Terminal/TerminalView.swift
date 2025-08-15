@@ -55,7 +55,7 @@ struct TerminalView: View {
         .onAppear {
             viewModel.connect()
             isInputFocused = true
-            
+
             // Load saved terminal width preference
             let savedWidth = TerminalWidthManager.shared.defaultWidth
             if savedWidth > 0 {
@@ -162,9 +162,12 @@ struct TerminalView: View {
                 let padding: CGFloat = 32
                 let charWidth: CGFloat = 9
                 let optimalCols = Int((screenWidth - padding) / charWidth)
-                
+
                 if optimalCols != viewModel.terminalCols {
-                    logger.info("📐 Infinite width selected, using optimal cols: \(optimalCols), keeping height at \(viewModel.terminalRows)")
+                    logger
+                        .info(
+                            "📐 Infinite width selected, using optimal cols: \(optimalCols), keeping height at \(viewModel.terminalRows)"
+                        )
                     viewModel.resize(cols: optimalCols, rows: viewModel.terminalRows)
                 }
             }
@@ -697,10 +700,10 @@ class TerminalViewModel {
     private var coordinatorReadyTime: Date?
     private var firstBufferArrivalTime: Date?
     private var bufferUpdateCount = 0
-    
-    // Callback for clean SwiftTerm renderer
+
+    /// Callback for clean SwiftTerm renderer
     var onBufferUpdateClean: ((TerminalHostingView.BufferSnapshot) -> Void)?
-    
+
     // Track theme changes
     var themeChanged = false
     var selectedTheme: TerminalTheme?
@@ -892,21 +895,24 @@ class TerminalViewModel {
             if let cleanCallback = onBufferUpdateClean {
                 cleanCallback(terminalSnapshot)
             }
-            
-            // Check if coordinator is ready (for original SwiftTerm renderer)
-            if let coordinator = terminalCoordinator as? TerminalHostingView.Coordinator, isCoordinatorReady {
-                coordinator.updateBuffer(from: terminalSnapshot)
-            } else {
-                // Queue the update
-                pendingBufferUpdates.append(terminalSnapshot)
-                logger
-                    .warning(
-                        "⏳ Buffer update #\(bufferUpdateCount): Coordinator not ready, queuing (queue size: \(pendingBufferUpdates.count))"
-                    )
 
-                // Try to set up coordinator if it's nil
-                if terminalCoordinator == nil {
-                    logger.error("❌ Coordinator is completely nil - this shouldn't happen!")
+            // Check if coordinator is ready (only for original SwiftTerm renderer)
+            // If the clean renderer is active, avoid queuing and logging noise
+            if onBufferUpdateClean == nil {
+                if let coordinator = terminalCoordinator as? TerminalHostingView.Coordinator, isCoordinatorReady {
+                    coordinator.updateBuffer(from: terminalSnapshot)
+                } else {
+                    // Queue the update
+                    pendingBufferUpdates.append(terminalSnapshot)
+                    logger
+                        .warning(
+                            "⏳ Buffer update #\(bufferUpdateCount): Coordinator not ready, queuing (queue size: \(pendingBufferUpdates.count))"
+                        )
+
+                    // Try to set up coordinator if it's nil
+                    if terminalCoordinator == nil {
+                        logger.error("❌ Coordinator is completely nil - this shouldn't happen!")
+                    }
                 }
             }
 
@@ -961,7 +967,6 @@ class TerminalViewModel {
             // Always update UI dimensions immediately for consistency
             terminalCols = cols
             terminalRows = rows
-
 
             // Perform initial resize after a short delay to let layout settle
             resizeDebounceTask?.cancel()
@@ -1131,14 +1136,14 @@ class TerminalViewModel {
     func setMaxWidth(_ maxWidth: Int) {
         // Store the max width preference
         // When maxWidth is 0, it means unlimited
-        
+
         if maxWidth == 0 {
             // For unlimited width, calculate optimal width based on screen
             let screenWidth = UIScreen.main.bounds.width
             let padding: CGFloat = 32 // Account for UI padding
             let charWidth: CGFloat = 9 // Approximate character width
             let optimalCols = Int((screenWidth - padding) / charWidth)
-            
+
             resize(cols: optimalCols, rows: terminalRows)
         } else if maxWidth != terminalCols {
             // Use the specified width
@@ -1166,7 +1171,7 @@ class TerminalViewModel {
             pendingBufferUpdates.removeAll()
         }
     }
-    
+
     func handleScroll(position: Double) {
         // Update scroll state based on position
         // Position is 0.0 at top, 1.0 at bottom
@@ -1175,14 +1180,14 @@ class TerminalViewModel {
             isAutoScrollEnabled = true
         }
     }
-    
+
     func updateTerminalSize(cols: Int, rows: Int) {
         // Update terminal dimensions and notify server
         terminalCols = cols
         terminalRows = rows
         resize(cols: cols, rows: rows)
     }
-    
+
     func sendInput(_ data: Data) {
         // Send raw data input to the server
         Task {

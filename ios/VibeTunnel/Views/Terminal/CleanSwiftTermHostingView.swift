@@ -13,6 +13,12 @@ struct CleanSwiftTermHostingView: UIViewRepresentable {
         let parent: CleanSwiftTermHostingView
         var lastBufferUpdate: Date = Date()
 
+        // Viewport tracking for scrolling through large buffers
+        private var viewportStart: Int = 0
+        private var totalBufferRows: Int = 0
+        private var terminalVisibleRows: Int = 50 // Will be updated from actual terminal
+        private var isAtBottom: Bool = true
+
         init(_ parent: CleanSwiftTermHostingView) {
             self.parent = parent
             super.init()
@@ -42,12 +48,170 @@ struct CleanSwiftTermHostingView: UIViewRepresentable {
         }
 
         func scrolled(source: SwiftTerm.TerminalView, position: Double) {
-            // Update scroll position
+            // Update viewport position based on scroll
+            updateViewportFromScroll(position: position)
+
+            // Update scroll state for UI
             let viewModel = parent.viewModel
+            let currentIsAtBottom = self.isAtBottom  // Capture before async
             DispatchQueue.main.async {
-                let isAtBottom = position >= 0.95
-                viewModel.updateScrollState(isAtBottom: isAtBottom)
+                viewModel.updateScrollState(isAtBottom: currentIsAtBottom)
             }
+        }
+
+        // MARK: - Viewport Management
+
+        func updateBufferState(totalRows: Int, viewportY: Int, cursorY: Int) {
+            self.totalBufferRows = totalRows
+
+            // Honor server's viewportY if provided, otherwise maintain current position
+            if viewportY > 0 {
+                self.viewportStart = max(0, min(viewportY, totalRows - terminalVisibleRows))
+            }
+
+            // Auto-scroll when new content arrives and we're at bottom
+            if isAtBottom && cursorY >= totalRows - terminalVisibleRows {
+                scrollToBottom()
+            }
+        }
+
+        func getVisibleWindow(bufferSize: Int) -> (start: Int, end: Int) {
+            let clampedStart = max(0, min(viewportStart, bufferSize - terminalVisibleRows))
+            let clampedEnd = min(clampedStart + terminalVisibleRows, bufferSize)
+            return (clampedStart, clampedEnd)
+        }
+
+        private func updateViewportFromScroll(position: Double) {
+            // Convert SwiftTerm's scroll position to our viewport
+            let maxScroll = max(0, totalBufferRows - terminalVisibleRows)
+            let newViewportStart = Int(position * Double(maxScroll))
+
+            viewportStart = max(0, min(newViewportStart, maxScroll))
+            isAtBottom = position >= 0.95
+        }
+
+        func scrollToBottom() {
+            let maxScroll = max(0, totalBufferRows - terminalVisibleRows)
+            viewportStart = maxScroll
+            isAtBottom = true
+        }
+
+        func updateTerminalDimensions(rows: Int) {
+            // Avoid zero rows which would produce an empty viewport
+            if rows > 0 {
+                self.terminalVisibleRows = rows
+            }
+        }
+
+        func convertBufferToANSI(_ snapshot: TerminalHostingView.BufferSnapshot) -> String {
+            var output = ""
+
+            // Update buffer tracking
+            updateBufferState(
+                totalRows: snapshot.rows,
+                viewportY: snapshot.viewportY,
+                cursorY: snapshot.cursorY
+            )
+
+            // Start frame: hide cursor, reset, move to home
+            output += "\u{001B}[?25l" // Hide cursor (prevent flicker)
+            output += "\u{001B}[0m" // Reset all attributes
+            output += "\u{001B}[H" // Move cursor home
+
+            // Get viewport window (fall back to a reasonable default if rows not initialized yet)
+            if terminalVisibleRows <= 0 {
+                // Default to a common terminal height until we learn the real value
+                terminalVisibleRows = 24
+            }
+
+            let (visibleStart, visibleEnd) = getVisibleWindow(bufferSize: snapshot.cells.count)
+            let visibleRows = Array(snapshot.cells[visibleStart..<min(visibleEnd, snapshot.cells.count)])
+
+            // Adjust cursor position relative to visible window
+            let adjustedCursorY = snapshot.cursorY - visibleStart
+
+            // Process each visible row
+            for rowIndex in 0..<visibleRows.count {
+                // Position cursor at start of line (1-based)
+                output += "\u{001B}[\(rowIndex + 1);1H"
+
+                let row = visibleRows[rowIndex]
+
+                // Track current attributes for optimization
+                var currentFg: Int? = nil
+                var currentBg: Int? = nil
+                var currentAttrs: Int = 0
+
+                // Process cells in row
+                for cell in row {
+                    // Handle attribute changes
+                    if let attrs = cell.attributes, attrs != currentAttrs {
+                        output += "\u{001B}[0m" // Reset
+                        currentFg = nil
+                        currentBg = nil
+                        currentAttrs = attrs
+
+                        // Apply text attributes
+                        if (attrs & 0x01) != 0 { output += "\u{001B}[1m" } // Bold
+                        if (attrs & 0x02) != 0 { output += "\u{001B}[3m" } // Italic
+                        if (attrs & 0x04) != 0 { output += "\u{001B}[4m" } // Underline
+                        if (attrs & 0x08) != 0 { output += "\u{001B}[2m" } // Dim
+                        if (attrs & 0x10) != 0 { output += "\u{001B}[7m" } // Inverse
+                        if (attrs & 0x40) != 0 { output += "\u{001B}[9m" } // Strikethrough
+                    } else if cell.attributes == nil && currentAttrs != 0 {
+                        output += "\u{001B}[0m" // Reset if no attributes
+                        currentFg = nil
+                        currentBg = nil
+                        currentAttrs = 0
+                    }
+
+                    // Handle foreground color
+                    if cell.fg != currentFg {
+                        currentFg = cell.fg
+                        if let fg = cell.fg {
+                            if fg <= 255 {
+                                output += "\u{001B}[38;5;\(fg)m"
+                            }
+                        } else {
+                            output += "\u{001B}[39m" // Default foreground
+                        }
+                    }
+
+                    // Handle background color
+                    if cell.bg != currentBg {
+                        currentBg = cell.bg
+                        if let bg = cell.bg {
+                            if bg <= 255 {
+                                output += "\u{001B}[48;5;\(bg)m"
+                            }
+                        } else {
+                            output += "\u{001B}[49m" // Default background
+                        }
+                    }
+
+                    // Output the character (or space if empty)
+                    output += cell.char.isEmpty ? " " : cell.char
+                }
+
+                // Clear to end of line (removes any leftover content)
+                output += "\u{001B}[K"
+            }
+
+            // Clear everything below last drawn row
+            output += "\u{001B}[J"
+
+            // Reset attributes
+            output += "\u{001B}[0m"
+
+            // Position cursor (1-based, using adjusted cursor position)
+            let cursorRow = max(1, min(terminalVisibleRows, adjustedCursorY + 1))
+            let cursorCol = max(1, snapshot.cursorX + 1)
+            output += "\u{001B}[\(cursorRow);\(cursorCol)H"
+
+            // Show cursor
+            output += "\u{001B}[?25h"
+
+            return output
         }
 
         func setTerminalTitle(source: SwiftTerm.TerminalView, title: String) {
@@ -109,9 +273,22 @@ struct CleanSwiftTermHostingView: UIViewRepresentable {
         setupBufferUpdates(for: terminalView, coordinator: context.coordinator)
 
         // Initial size setup
-        if viewModel.terminalCols > 0 && viewModel.terminalRows > 0 {
-            terminalView.resize(cols: viewModel.terminalCols, rows: viewModel.terminalRows)
-        }
+        // Always ensure the terminal has non-zero dimensions on creation
+        let defaultRows = viewModel.terminalRows > 0 ? viewModel.terminalRows : 24
+        let defaultCols: Int = {
+            if viewModel.terminalCols > 0 {
+                return viewModel.terminalCols
+            }
+            // Approximate cols from screen width and an average character width
+            let screenWidth = UIScreen.main.bounds.width
+            let charWidth: CGFloat = 9
+            return max(40, Int(screenWidth / charWidth))
+        }()
+        terminalView.resize(cols: defaultCols, rows: defaultRows)
+
+        // Update coordinator with actual terminal dimensions
+        let actualRows = terminalView.getTerminal().rows
+        context.coordinator.updateTerminalDimensions(rows: actualRows)
 
         return terminalView
     }
@@ -135,121 +312,26 @@ struct CleanSwiftTermHostingView: UIViewRepresentable {
 
     private func setupBufferUpdates(for terminalView: CleanSwiftTermView, coordinator: Coordinator) {
         // Subscribe to buffer updates and convert to ANSI
-        viewModel.onBufferUpdateClean = { [weak terminalView, weak coordinator] (snapshot: TerminalHostingView.BufferSnapshot) in
-            guard let terminalView else { return }
-            
-            // Rate limiting check (60fps max)
-            let now = Date()
-            if let lastUpdate = coordinator?.lastBufferUpdate,
-               now.timeIntervalSince(lastUpdate) < 0.016 { // ~60fps
-                return
-            }
-            coordinator?.lastBufferUpdate = now
-            
-            // Convert buffer snapshot to ANSI
-            let ansiData = convertBufferToANSI(snapshot)
-            
-            // Feed to terminal on main thread
-            DispatchQueue.main.async {
-                terminalView.feed(text: ansiData)
-            }
-        }
-    }
+        viewModel
+            .onBufferUpdateClean =
+            { [weak terminalView, weak coordinator] (snapshot: TerminalHostingView.BufferSnapshot) in
+                guard let terminalView, let coordinator else { return }
 
-    private func convertBufferToANSI(_ snapshot: TerminalHostingView.BufferSnapshot) -> String {
-        var output = ""
-        
-        // Start frame: hide cursor, reset, clear screen
-        output += "\u{001B}[?25l"  // Hide cursor (prevent flicker)
-        output += "\u{001B}[0m"     // Reset all attributes
-        output += "\u{001B}[H"      // Move cursor home
-        output += "\u{001B}[2J"     // Clear entire screen
-        
-        // Handle windowing if buffer is larger than visible area
-        let maxRows = min(snapshot.rows, 50) // Clamp to reasonable visible area
-        
-        // Process each visible row
-        for rowIndex in 0..<min(snapshot.cells.count, maxRows) {
-            // Position cursor at start of line (1-based)
-            output += "\u{001B}[\(rowIndex + 1);1H"
-            
-            let row = snapshot.cells[rowIndex]
-            
-            // Track current attributes for optimization
-            var currentFg: Int? = nil
-            var currentBg: Int? = nil
-            var currentAttrs: Int = 0
-            
-            // Process cells in row
-            for cell in row {
-                // Handle attribute changes
-                if let attrs = cell.attributes, attrs != currentAttrs {
-                    output += "\u{001B}[0m" // Reset
-                    currentFg = nil
-                    currentBg = nil
-                    currentAttrs = attrs
-                    
-                    // Apply text attributes
-                    if (attrs & 0x01) != 0 { output += "\u{001B}[1m" } // Bold
-                    if (attrs & 0x02) != 0 { output += "\u{001B}[3m" } // Italic
-                    if (attrs & 0x04) != 0 { output += "\u{001B}[4m" } // Underline
-                    if (attrs & 0x08) != 0 { output += "\u{001B}[2m" } // Dim
-                    if (attrs & 0x10) != 0 { output += "\u{001B}[7m" } // Inverse
-                    if (attrs & 0x40) != 0 { output += "\u{001B}[9m" } // Strikethrough
-                } else if cell.attributes == nil && currentAttrs != 0 {
-                    output += "\u{001B}[0m" // Reset if no attributes
-                    currentFg = nil
-                    currentBg = nil
-                    currentAttrs = 0
+                // Rate limiting check (60fps max)
+                let now = Date()
+                if now.timeIntervalSince(coordinator.lastBufferUpdate) < 0.016 { // ~60fps
+                    return
                 }
-                
-                // Handle foreground color
-                if cell.fg != currentFg {
-                    currentFg = cell.fg
-                    if let fg = cell.fg {
-                        if fg <= 255 {
-                            output += "\u{001B}[38;5;\(fg)m"
-                        }
-                    } else {
-                        output += "\u{001B}[39m" // Default foreground
-                    }
+                coordinator.lastBufferUpdate = now
+
+                // Convert buffer snapshot to ANSI using coordinator
+                let ansiData = coordinator.convertBufferToANSI(snapshot)
+
+                // Feed to terminal on main thread
+                DispatchQueue.main.async {
+                    terminalView.feed(text: ansiData)
                 }
-                
-                // Handle background color
-                if cell.bg != currentBg {
-                    currentBg = cell.bg
-                    if let bg = cell.bg {
-                        if bg <= 255 {
-                            output += "\u{001B}[48;5;\(bg)m"
-                        }
-                    } else {
-                        output += "\u{001B}[49m" // Default background
-                    }
-                }
-                
-                // Output the character (or space if empty)
-                output += cell.char.isEmpty ? " " : cell.char
             }
-            
-            // Clear to end of line (removes any leftover content)
-            output += "\u{001B}[K"
-        }
-        
-        // Clear everything below last drawn row (belt-and-suspenders)
-        output += "\u{001B}[J"
-        
-        // Reset attributes
-        output += "\u{001B}[0m"
-        
-        // Position cursor (1-based, clamped to visible area)
-        let cursorRow = min(max(1, snapshot.cursorY + 1), maxRows)
-        let cursorCol = max(1, snapshot.cursorX + 1)
-        output += "\u{001B}[\(cursorRow);\(cursorCol)H"
-        
-        // Show cursor
-        output += "\u{001B}[?25h"
-        
-        return output
     }
 
     private func applyTheme(to terminalView: CleanSwiftTermView) {
