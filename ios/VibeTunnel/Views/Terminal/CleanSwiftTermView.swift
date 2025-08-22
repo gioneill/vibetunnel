@@ -23,6 +23,13 @@ class CleanSwiftTermView: SwiftTerm.TerminalView {
         // Use system colors that adapt to light/dark mode
         nativeForegroundColor = .label
         nativeBackgroundColor = .systemBackground
+        
+        // Layer optimization for better performance
+        // isOpaque = true
+        // contentScaleFactor = UIScreen.main.scale
+        // layer.contentsScale = UIScreen.main.scale
+        // layer.shouldRasterize = false
+        // contentMode = .redraw
 
         // Log initialization
         let terminal = getTerminal()

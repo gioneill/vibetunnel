@@ -17,7 +17,7 @@ struct CleanSwiftTermHostingView: UIViewRepresentable {
         private var viewportStart: Int = 0
         private var totalBufferRows: Int = 0
         private var terminalVisibleRows: Int = 50 // Will be updated from actual terminal
-        private var isAtBottom: Bool = true
+        var isAtBottom: Bool = true
 
         init(_ parent: CleanSwiftTermHostingView) {
             self.parent = parent
@@ -53,7 +53,7 @@ struct CleanSwiftTermHostingView: UIViewRepresentable {
 
             // Update scroll state for UI
             let viewModel = parent.viewModel
-            let currentIsAtBottom = self.isAtBottom  // Capture before async
+            let currentIsAtBottom = self.isAtBottom // Capture before async
             DispatchQueue.main.async {
                 viewModel.updateScrollState(isAtBottom: currentIsAtBottom)
             }
@@ -256,7 +256,7 @@ struct CleanSwiftTermHostingView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> CleanSwiftTermView {
-        logger.info("Creating CleanSwiftTermView")
+        logger.info("Creating CleanSwiftTermView (raw ANSI mode)")
 
         let terminalView = CleanSwiftTermView(frame: .zero)
 
@@ -265,74 +265,38 @@ struct CleanSwiftTermHostingView: UIViewRepresentable {
 
         // Apply theme if available
         applyTheme(to: terminalView)
+        
+        // Wire up raw ANSI feed - direct and simple!
+        viewModel.onRawANSIUpdate = { [weak terminalView] ansiData in
+            guard let terminalView = terminalView else { return }
+            
+            DispatchQueue.main.async {
+                terminalView.feed(text: ansiData)
+            }
+        }
+
+        // Initial size setup
+        if viewModel.terminalCols > 0 && viewModel.terminalRows > 0 {
+            terminalView.resize(cols: viewModel.terminalCols, rows: viewModel.terminalRows)
+        }
 
         // Ensure keyboard input works
         _ = terminalView.becomeFirstResponder()
-
-        // Set up buffer update handling
-        setupBufferUpdates(for: terminalView, coordinator: context.coordinator)
-
-        // Initial size setup
-        // Always ensure the terminal has non-zero dimensions on creation
-        let defaultRows = viewModel.terminalRows > 0 ? viewModel.terminalRows : 24
-        let defaultCols: Int = {
-            if viewModel.terminalCols > 0 {
-                return viewModel.terminalCols
-            }
-            // Approximate cols from screen width and an average character width
-            let screenWidth = UIScreen.main.bounds.width
-            let charWidth: CGFloat = 9
-            return max(40, Int(screenWidth / charWidth))
-        }()
-        terminalView.resize(cols: defaultCols, rows: defaultRows)
-
-        // Update coordinator with actual terminal dimensions
-        let actualRows = terminalView.getTerminal().rows
-        context.coordinator.updateTerminalDimensions(rows: actualRows)
 
         return terminalView
     }
 
     func updateUIView(_ uiView: CleanSwiftTermView, context: Context) {
-        // Handle state changes only, not data feeding
-        // Data is fed through the subscription set up in makeUIView
-
-        // Update focus state if needed
+        // Only handle focus and theme changes
         if viewModel.shouldBecomeFirstResponder {
             _ = uiView.becomeFirstResponder()
         }
-
-        // Update theme if changed
         if viewModel.themeChanged {
             applyTheme(to: uiView)
         }
     }
 
     // MARK: - Helper Methods
-
-    private func setupBufferUpdates(for terminalView: CleanSwiftTermView, coordinator: Coordinator) {
-        // Subscribe to buffer updates and convert to ANSI
-        viewModel
-            .onBufferUpdateClean =
-            { [weak terminalView, weak coordinator] (snapshot: TerminalHostingView.BufferSnapshot) in
-                guard let terminalView, let coordinator else { return }
-
-                // Rate limiting check (60fps max)
-                let now = Date()
-                if now.timeIntervalSince(coordinator.lastBufferUpdate) < 0.016 { // ~60fps
-                    return
-                }
-                coordinator.lastBufferUpdate = now
-
-                // Convert buffer snapshot to ANSI using coordinator
-                let ansiData = coordinator.convertBufferToANSI(snapshot)
-
-                // Feed to terminal on main thread
-                DispatchQueue.main.async {
-                    terminalView.feed(text: ansiData)
-                }
-            }
-    }
 
     private func applyTheme(to terminalView: CleanSwiftTermView) {
         // Apply theme colors

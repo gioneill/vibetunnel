@@ -192,13 +192,15 @@ struct TerminalHostingView: UIViewRepresentable {
             }
         }
 
-        /// Update terminal buffer from binary buffer data using optimized ANSI sequences
+        /// Update terminal buffer from WebSocket buffer snapshots
         func updateBuffer(from snapshot: BufferSnapshot) {
             guard let terminal else {
                 logger.error("❌ updateBuffer called but terminal is nil!")
                 return
             }
 
+            // Legacy buffer conversion code - should not be reached with SSE
+            logger.warning("⚠️ No ANSI data in snapshot - this shouldn't happen with SSE")
             logger.info("🧵 updateBuffer on main thread: \(Thread.isMainThread)")
 
             // Get the actual terminal dimensions (what iOS can display)
@@ -831,9 +833,14 @@ struct TerminalHostingView: UIViewRepresentable {
         }
 
         func scrollToBottom() {
-            // Scroll to bottom by sending page down keys
+            // Use SwiftTerm's proper scroll API instead of sending escape codes
             if let terminal {
-                terminal.feed(text: "\u{001b}[B")
+                // TerminalView has a scroll(toPosition:) method
+                // Position 1.0 means bottom of the scrollback buffer
+                terminal.scroll(toPosition: 1.0)
+                // Force a display update
+                terminal.setNeedsDisplay()
+                logger.info("📍 Scrolled to bottom using SwiftTerm scroll API")
             }
         }
 
