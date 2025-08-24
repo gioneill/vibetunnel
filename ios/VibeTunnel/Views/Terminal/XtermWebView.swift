@@ -49,7 +49,6 @@ struct XtermWebView: UIViewRepresentable {
         weak var webView: WKWebView?
         private var bufferWebSocketClient: BufferWebSocketClient?
         private let logger = Logger(category: "XtermWebView")
-        private var sseClient: SSEClient?
 
         init(_ parent: XtermWebView) {
             self.parent = parent
@@ -276,19 +275,14 @@ struct XtermWebView: UIViewRepresentable {
         private func setupDataStreaming() {
             // Subscribe to WebSocket buffer updates
             if bufferWebSocketClient == nil {
-                bufferWebSocketClient = parent.viewModel.bufferWebSocketClient
+                bufferWebSocketClient = BufferWebSocketClient.shared
             }
 
             bufferWebSocketClient?.subscribe(to: parent.session.id) { [weak self] event in
                 self?.handleWebSocketEvent(event)
             }
 
-            // Also set up SSE as fallback
-            if let streamURL = APIClient.shared.streamURL(for: parent.session.id) {
-                sseClient = SSEClient(url: streamURL)
-                sseClient?.delegate = self
-                sseClient?.start()
-            }
+            // SSE fallback removed; xterm uses WebSocket buffer snapshots only
         }
 
         private func handleWebSocketEvent(_ event: TerminalWebSocketEvent) {
@@ -374,6 +368,11 @@ extension XtermWebView.Coordinator: SSEClientDelegate {
     nonisolated func sseClient(_ client: SSEClient, didReceiveEvent event: SSEClient.SSEEvent) {
         Task { @MainActor in
             switch event {
+            case .connected:
+                // Connection established - XtermWebView doesn't need to handle this
+                break
+            case .header(let cols, let rows):
+                logger.debug("Received header: \(cols)x\(rows)")
             case .terminalOutput(_, let type, let data):
                 if type == "o" { // output
                     writeToTerminal(data)
@@ -382,6 +381,8 @@ extension XtermWebView.Coordinator: SSEClientDelegate {
                 writeToTerminal("\r\n[Process exited with code \(exitCode)]\r\n")
             case .error(let error):
                 logger.error("SSE error: \(error)")
+            case .resize, .bell, .alert:
+                break
             }
         }
     }

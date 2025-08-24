@@ -35,7 +35,7 @@ struct TerminalView: View {
 
     init(session: Session) {
         self.session = session
-        self._viewModel = State(initialValue: TerminalViewModel(session: session))
+        self._viewModel = State(initialValue: TerminalViewModel(session: session, renderer: TerminalRenderer.selected))
     }
 
     var body: some View {
@@ -53,7 +53,13 @@ struct TerminalView: View {
         }
         .focusable()
         .onAppear {
-            viewModel.connect()
+            // Choose connection strategy per renderer
+            switch selectedRenderer {
+            case .swiftTerm, .xterm:
+                viewModel.connectWebSocket()
+            case .swiftTermClean:
+                viewModel.connectSSE()
+            }
             isInputFocused = true
 
             // Load saved terminal width preference
@@ -72,7 +78,7 @@ struct TerminalView: View {
                 let padding: CGFloat = 32
                 let charWidth: CGFloat = 9
                 let optimalCols = Int((screenWidth - padding) / charWidth)
-                viewModel.resize(cols: optimalCols, rows: viewModel.terminalRows)
+                viewModel.resize(cols: max(optimalCols, 80), rows: max(viewModel.terminalRows, 24))
                 logger.info("📐 No saved width, using unlimited with optimal cols: \(optimalCols)")
             }
         }
@@ -154,7 +160,7 @@ struct TerminalView: View {
                 // Explicit width selected
                 if width != viewModel.terminalCols {
                     logger.info("📐 Width preference changed to \(width), keeping height at \(viewModel.terminalRows)")
-                    viewModel.resize(cols: width, rows: viewModel.terminalRows)
+                    viewModel.resize(cols: width, rows: max(viewModel.terminalRows, 24))
                 }
             } else {
                 // Infinite width selected (nil)
@@ -168,7 +174,7 @@ struct TerminalView: View {
                         .info(
                             "📐 Infinite width selected, using optimal cols: \(optimalCols), keeping height at \(viewModel.terminalRows)"
                         )
-                    viewModel.resize(cols: optimalCols, rows: viewModel.terminalRows)
+                    viewModel.resize(cols: max(optimalCols, 80), rows: max(viewModel.terminalRows, 24))
                 }
             }
         }
@@ -684,6 +690,7 @@ struct TerminalView: View {
 class TerminalViewModel {
     var isConnecting = true
     var isConnected = false
+    var hasReceivedData = false
     var errorMessage: String?
     var terminalViewId = UUID()
     var terminalCols: Int = 0
@@ -694,15 +701,22 @@ class TerminalViewModel {
     var isAtBottom = true
     var fitToWidth = false
 
-    // Buffer queueing for coordinator initialization race condition
-    private var pendingBufferUpdates: [TerminalHostingView.BufferSnapshot] = []
+    // Coordinator tracking
     private var isCoordinatorReady = false
-    private var coordinatorReadyTime: Date?
-    private var firstBufferArrivalTime: Date?
-    private var bufferUpdateCount = 0
+    private var pendingAnsiChunks: [String] = []
+    private var sseBootstrapped = false
 
+    // WebSocket client is managed internally via shared instance
+    
     /// Callback for clean SwiftTerm renderer
     var onBufferUpdateClean: ((TerminalHostingView.BufferSnapshot) -> Void)?
+    
+    /// Callback for raw ANSI updates (clean renderer)
+    var onRawANSIUpdate: ((String) -> Void)?
+    
+    // Seeding state for clean renderer
+    private var isSeeding = false
+    private var bufferedSSEChunks: [String] = []
 
     // Track theme changes
     var themeChanged = false
@@ -711,18 +725,18 @@ class TerminalViewModel {
 
     let session: Session
     let castRecorder: CastRecorder
-    let bufferWebSocketClient: BufferWebSocketClient
-    private var connectionStatusTask: Task<Void, Never>?
-    private var connectionErrorTask: Task<Void, Never>?
+    let renderer: TerminalRenderer
+    private var sseClient: SSEClient?
+    private let bufferWebSocketClient = BufferWebSocketClient.shared
     private var resizeDebounceTask: Task<Void, Never>?
     private var hasPerformedInitialResize = false
     private var isPerformingInitialResize = false
     weak var terminalCoordinator: AnyObject? // Can be TerminalHostingView.Coordinator
 
-    init(session: Session) {
+    init(session: Session, renderer: TerminalRenderer = .selected) {
         self.session = session
+        self.renderer = renderer
         self.castRecorder = CastRecorder(sessionId: session.id, width: 80, height: 24)
-        self.bufferWebSocketClient = BufferWebSocketClient.shared
         setupTerminal()
     }
 
@@ -739,192 +753,130 @@ class TerminalViewModel {
     }
 
     func connect() {
+        logger.info("Launching terminal for session: \(session.id) with renderer: \(renderer.rawValue)")
         isConnecting = true
         errorMessage = nil
 
-        // Subscribe to terminal events first (stores the handler)
+        switch renderer {
+        case .swiftTerm, .xterm:
+            // Use WebSocket buffers for native and xterm renderers
+            connectWebSocket()
+        case .swiftTermClean:
+            // Use SSE for clean renderer
+            connectSSE()
+        }
+    }
+
+    func connectWebSocket() {
+        // Attach auth from APIClient if available
+        if let auth = APIClient.shared.authenticationService {
+            bufferWebSocketClient.setAuthenticationService(auth)
+        }
+        // Subscribe to session updates
         bufferWebSocketClient.subscribe(to: session.id) { [weak self] event in
             Task { @MainActor in
                 self?.handleWebSocketEvent(event)
             }
         }
-
-        // Connect to WebSocket - it will automatically subscribe to stored sessions
+        // Ensure socket connection is established
         bufferWebSocketClient.connect()
-
-        // Monitor connection status
-        connectionStatusTask?.cancel()
-        connectionStatusTask = Task { [weak self] in
-            guard let self else { return }
-            var lastConnectedState: Bool? = nil
-            while !Task.isCancelled {
-                let connected = self.bufferWebSocketClient.isConnected
-
-                if connected != lastConnectedState {
-                    lastConnectedState = connected
-                    await MainActor.run {
-                        self.isConnecting = false
-                        self.isConnected = connected
-                        if !connected {
-                            self.errorMessage = "WebSocket disconnected"
-                        } else {
-                            self.errorMessage = nil
-                        }
-                    }
-                }
-
-                try? await Task.sleep(nanoseconds: 500_000_000) // Check every 0.5 seconds
-            }
+        logger.info("Starting WebSocket connection for session: \(session.id)")
+    }
+    
+    func connectSSE() {
+        // Ensure auth is set for BufferWebSocketClient (for seeding phase)
+        if let auth = APIClient.shared.authenticationService {
+            bufferWebSocketClient.setAuthenticationService(auth)
+        }
+        
+        // Build SSE URL using APIClient (ensures correct base URL)
+        guard let streamURL = APIClient.shared.streamURL(for: session.id) else {
+            errorMessage = "Invalid SSE URL"
+            return
         }
 
-        // Monitor connection errors
-        connectionErrorTask?.cancel()
-        connectionErrorTask = Task { [weak self] in
-            guard let self else { return }
-            var lastError: String? = nil
-            while !Task.isCancelled {
-                let currentError = self.bufferWebSocketClient.connectionError?.localizedDescription
-
-                if currentError != lastError {
-                    lastError = currentError
-                    await MainActor.run {
-                        self.errorMessage = currentError
-                        self.isConnecting = false
-                    }
+        // Pass authentication service from APIClient for proper token attachment
+        sseClient = SSEClient(url: streamURL, authenticationService: APIClient.shared.authenticationService)
+        
+        // For clean renderer, start seeding phase
+        if renderer == .swiftTermClean {
+            isSeeding = true
+            bufferedSSEChunks = []
+            
+            // Subscribe to /buffers for one-time seed
+            bufferWebSocketClient.subscribe(to: session.id) { [weak self] update in
+                guard let self = self else { return }
+                
+                // Only process if still seeding
+                guard self.isSeeding else {
+                    // Unsubscribe if we're no longer seeding
+                    self.bufferWebSocketClient.unsubscribe(from: self.session.id)
+                    return
                 }
+                
+                switch update {
+                case .bufferUpdate(let snapshot):
+                    // Convert snapshot to ANSI once for initial seed
+                    let seedANSI = self.convertBufferToANSI(snapshot)
+                    self.onRawANSIUpdate?(seedANSI)
+                    
+                    // Clean up seeding state
+                    self.completeSeeding()
+                    
+                default:
+                    // For any other event during seeding, just log it
+                    logger.debug("Received non-buffer event during seeding: \(update)")
+                    break
+                }
+            }
+            
+            // Ensure socket connection is established for seeding
+            bufferWebSocketClient.connect()
+        }
+        
+        sseClient?.delegate = self
+        sseClient?.start()
 
-                try? await Task.sleep(nanoseconds: 500_000_000) // Check every 0.5 seconds
+        // Keep isConnecting = true, connection status will be updated via delegate
+        // when SSE actually connects (.connected event) or fails
+        logger.info("Starting SSE connection to: \(streamURL)")
+        
+        // Add overall connection timeout - if SSE never opens, show error
+        Task {
+            try? await Task.sleep(nanoseconds: 15_000_000_000) // 15 seconds
+            if isConnecting {
+                logger.error("SSE connection timeout - never received HTTP 200")
+                errorMessage = "Connection timeout - unable to connect to terminal session"
+                isConnecting = false
+                sseClient?.stop()
+                sseClient = nil
             }
         }
     }
 
+
     func disconnect() {
-        connectionStatusTask?.cancel()
-        connectionErrorTask?.cancel()
         resizeDebounceTask?.cancel()
+        
+        // Clean up seeding state if still active
+        if isSeeding {
+            isSeeding = false
+            bufferedSSEChunks.removeAll()
+        }
+        
+        // Unsubscribe from buffers (handles both seeding and normal cases)
         bufferWebSocketClient.unsubscribe(from: session.id)
-        // Note: Don't disconnect the shared client as other views might be using it
+        
+        // Stop SSE if active
+        sseClient?.stop()
+        sseClient = nil
+        
+        // Clear raw ANSI callback
+        onRawANSIUpdate = nil
+        
         isConnected = false
     }
 
-    @MainActor
-    private func handleWebSocketEvent(_ event: TerminalWebSocketEvent) {
-        switch event {
-        case .header(let width, let height):
-            // Initial terminal setup - these are the server's actual PTY dimensions
-            logger.info("📊 Server reported terminal dimensions: \(width)×\(height)")
-            terminalCols = width
-            terminalRows = height
-            // The terminal view will use these dimensions when created
-
-        case .output(_, let data):
-            // Feed output data directly to the terminal
-            if let coordinator = terminalCoordinator as? TerminalHostingView.Coordinator {
-                coordinator.feedData(data)
-            } else {
-                // Queue the data to be fed once coordinator is ready
-                logger.warning("Terminal coordinator not ready, queueing data")
-                Task {
-                    // Wait a bit for coordinator to be initialized
-                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1s
-                    if let coordinator = self.terminalCoordinator as? TerminalHostingView.Coordinator {
-                        coordinator.feedData(data)
-                    }
-                }
-            }
-            // Record output if recording
-            castRecorder.recordOutput(data)
-
-        case .resize(_, let dimensions):
-            // Parse dimensions like "120x30"
-            let parts = dimensions.split(separator: "x")
-            if parts.count == 2,
-               let cols = Int(parts[0]),
-               let rows = Int(parts[1])
-            {
-                // Update terminal dimensions
-                terminalCols = cols
-                terminalRows = rows
-                logger.info("Terminal resize: \(cols)x\(rows)")
-                // Record resize event
-                castRecorder.recordResize(cols: cols, rows: rows)
-            }
-
-        case .exit(let code):
-            // Session has exited
-            isConnected = false
-            if code != 0 {
-                errorMessage = "Session exited with code \(code)"
-            }
-            // Stop recording if active
-            if castRecorder.isRecording {
-                stopRecording()
-            }
-
-            // Session has exited - no need to load additional content
-
-        case .bufferUpdate(let snapshot):
-            bufferUpdateCount += 1
-
-            // Track timing for diagnostics
-            if firstBufferArrivalTime == nil {
-                firstBufferArrivalTime = Date()
-            }
-
-            // Convert to TerminalHostingView.BufferSnapshot
-            let terminalSnapshot = TerminalHostingView.BufferSnapshot(
-                cols: snapshot.cols,
-                rows: snapshot.rows,
-                viewportY: snapshot.viewportY,
-                cursorX: snapshot.cursorX,
-                cursorY: snapshot.cursorY,
-                cells: snapshot.cells.map { row in
-                    row.map { cell in
-                        TerminalHostingView.BufferCell(
-                            char: cell.char,
-                            width: cell.width,
-                            fg: cell.fg,
-                            bg: cell.bg,
-                            attributes: cell.attributes
-                        )
-                    }
-                }
-            )
-
-            // Send to clean renderer if callback is set
-            if let cleanCallback = onBufferUpdateClean {
-                cleanCallback(terminalSnapshot)
-            }
-
-            // Check if coordinator is ready (only for original SwiftTerm renderer)
-            // If the clean renderer is active, avoid queuing and logging noise
-            if onBufferUpdateClean == nil {
-                if let coordinator = terminalCoordinator as? TerminalHostingView.Coordinator, isCoordinatorReady {
-                    coordinator.updateBuffer(from: terminalSnapshot)
-                } else {
-                    // Queue the update
-                    pendingBufferUpdates.append(terminalSnapshot)
-                    logger
-                        .warning(
-                            "⏳ Buffer update #\(bufferUpdateCount): Coordinator not ready, queuing (queue size: \(pendingBufferUpdates.count))"
-                        )
-
-                    // Try to set up coordinator if it's nil
-                    if terminalCoordinator == nil {
-                        logger.error("❌ Coordinator is completely nil - this shouldn't happen!")
-                    }
-                }
-            }
-
-        case .bell:
-            // Terminal bell - play sound and/or haptic feedback
-            handleTerminalBell()
-
-        case .alert(let title, let message):
-            // Terminal alert - show notification
-            handleTerminalAlert(title: title, message: message)
-        }
-    }
 
     func sendInput(_ text: String) {
         Task {
@@ -1129,7 +1081,7 @@ class TerminalViewModel {
             let optimalCols = Int((screenWidth - padding) / charWidth)
 
             // Resize to fit
-            resize(cols: optimalCols, rows: terminalRows)
+            resize(cols: max(optimalCols, 80), rows: max(terminalRows, 24))
         }
     }
 
@@ -1144,10 +1096,10 @@ class TerminalViewModel {
             let charWidth: CGFloat = 9 // Approximate character width
             let optimalCols = Int((screenWidth - padding) / charWidth)
 
-            resize(cols: optimalCols, rows: terminalRows)
+            resize(cols: max(optimalCols, 80), rows: max(terminalRows, 24))
         } else if maxWidth != terminalCols {
             // Use the specified width
-            resize(cols: maxWidth, rows: terminalRows)
+            resize(cols: maxWidth, rows: max(terminalRows, 24))
         }
 
         // Update the terminal coordinator
@@ -1158,17 +1110,85 @@ class TerminalViewModel {
 
     /// Called when the terminal coordinator is fully initialized and ready
     func notifyCoordinatorReady() {
-        coordinatorReadyTime = Date()
         isCoordinatorReady = true
+        logger.info("✅ Coordinator ready!")
+        // Flush any ANSI chunks buffered before coordinator was ready (for clean renderer via onBufferUpdateClean)
+        if !pendingAnsiChunks.isEmpty, let clean = onBufferUpdateClean {
+            logger.info("Flushing \(pendingAnsiChunks.count) pending ANSI chunk(s) to clean renderer")
+            for chunk in pendingAnsiChunks {
+                let lines = chunk.components(separatedBy: "\n")
+                let cellRows: [[TerminalHostingView.BufferCell]] = lines.map { line in
+                    line.map { ch in
+                        TerminalHostingView.BufferCell(char: String(ch), width: 1, fg: nil, bg: nil, attributes: nil)
+                    }
+                }
+                let cols = cellRows.map { $0.count }.max() ?? 0
+                let rows = cellRows.count
+                let snap = TerminalHostingView.BufferSnapshot(
+                    cols: cols,
+                    rows: rows,
+                    viewportY: 0,
+                    cursorX: 0,
+                    cursorY: max(0, rows - 1),
+                    cells: cellRows
+                )
+                clean(snap)
+            }
+            pendingAnsiChunks.removeAll()
+        }
+    }
 
-        // Process all pending updates
-        if !pendingBufferUpdates.isEmpty {
-            if let coordinator = terminalCoordinator as? TerminalHostingView.Coordinator {
-                for (_, snapshot) in pendingBufferUpdates.enumerated() {
-                    coordinator.updateBuffer(from: snapshot)
+    /// Fetch a one-time snapshot and feed it as initial history before live SSE updates
+    private func bootstrapInitialSnapshot() async {
+        guard !sseBootstrapped else { return }
+        sseBootstrapped = true
+        do {
+            logger.info("Bootstrapping initial snapshot for session: \(session.id)")
+            let serverSnapshot = try await APIClient.shared.getSessionSnapshot(sessionId: session.id)
+
+            if let header = serverSnapshot.header {
+                terminalCols = header.width
+                terminalRows = header.height
+                logger.info("Snapshot header dimensions: \(header.width)x\(header.height)")
+            }
+
+            let ansi = serverSnapshot.events
+                .filter { $0.type == .output }
+                .map { $0.data }
+                .joined()
+
+            guard !ansi.isEmpty else {
+                logger.info("Snapshot contained no output events")
+                return
+            }
+
+            // For clean renderer, synthesize cells and send via clean callback if available
+            let lines = ansi.components(separatedBy: "\n")
+            let cellRows: [[TerminalHostingView.BufferCell]] = lines.map { line in
+                line.map { ch in
+                    TerminalHostingView.BufferCell(char: String(ch), width: 1, fg: nil, bg: nil, attributes: nil)
                 }
             }
-            pendingBufferUpdates.removeAll()
+            let cols = cellRows.map { $0.count }.max() ?? 0
+            let rows = cellRows.count
+            let snap = TerminalHostingView.BufferSnapshot(
+                cols: cols,
+                rows: rows,
+                viewportY: 0,
+                cursorX: 0,
+                cursorY: max(0, rows - 1),
+                cells: cellRows
+            )
+            if let clean = onBufferUpdateClean {
+                logger.info("Feeding bootstrapped snapshot (rows=\(rows), cols=\(cols)) to clean renderer")
+                clean(snap)
+            } else {
+                // No clean callback; buffer raw for later
+                logger.info("Clean renderer not ready; buffering bootstrapped ANSI (len=\(ansi.count))")
+                pendingAnsiChunks.append(ansi)
+            }
+        } catch {
+            logger.error("Failed to bootstrap snapshot: \(error)")
         }
     }
 
@@ -1179,6 +1199,73 @@ class TerminalViewModel {
         if isAtBottom {
             isAutoScrollEnabled = true
         }
+    }
+    
+    private func completeSeeding() {
+        // Unsubscribe from buffers
+        bufferWebSocketClient.unsubscribe(from: session.id)
+        
+        // End seeding phase
+        isSeeding = false
+        
+        // Flush any buffered SSE chunks
+        for chunk in bufferedSSEChunks {
+            onRawANSIUpdate?(chunk)
+        }
+        bufferedSSEChunks.removeAll()
+    }
+    
+    private func convertBufferToANSI(_ snapshot: BufferSnapshot) -> String {
+        var output = ""
+        
+        // Clear screen and reset for initial seed
+        output += "\u{001B}[2J"  // Clear entire screen
+        output += "\u{001B}[0m"   // Reset attributes
+        output += "\u{001B}[H"    // Move cursor home
+        
+        // Convert visible viewport
+        for (rowIndex, row) in snapshot.cells.enumerated() {
+            // Position cursor at start of line
+            output += "\u{001B}[\(rowIndex + 1);1H"
+            
+            var currentFg: Int? = nil
+            var currentBg: Int? = nil
+            
+            for cell in row {
+                // Only set colors if they change
+                if cell.fg != currentFg {
+                    currentFg = cell.fg
+                    if let fg = cell.fg {
+                        output += "\u{001B}[38;5;\(fg)m"
+                    } else {
+                        output += "\u{001B}[39m"  // Default fg
+                    }
+                }
+                
+                if cell.bg != currentBg {
+                    currentBg = cell.bg
+                    if let bg = cell.bg {
+                        output += "\u{001B}[48;5;\(bg)m"
+                    } else {
+                        output += "\u{001B}[49m"  // Default bg
+                    }
+                }
+                
+                // Output character
+                output += cell.char.isEmpty ? " " : cell.char
+            }
+            
+            // Clear to end of line
+            output += "\u{001B}[K"
+        }
+        
+        // Position cursor
+        output += "\u{001B}[\(snapshot.cursorY + 1);\(snapshot.cursorX + 1)H"
+        output += "\u{001B}[?25h"  // Show cursor
+        
+        logger.info("Seeded terminal with \(snapshot.cells.count) rows from buffer snapshot")
+        
+        return output
     }
 
     func updateTerminalSize(cols: Int, rows: Int) {
@@ -1203,6 +1290,258 @@ class TerminalViewModel {
                 }
             } catch {
                 logger.error("Failed to send input data: \(error)")
+            }
+        }
+    }
+}
+
+// MARK: - WebSocket Event Handling
+
+extension TerminalViewModel {
+    private func handleWebSocketEvent(_ event: TerminalWebSocketEvent) {
+        switch event {
+        case .bufferUpdate(let snapshot):
+            hasReceivedData = true
+            
+            // Convert BufferSnapshot to TerminalHostingView.BufferSnapshot
+            if let coordinator = terminalCoordinator as? TerminalHostingView.Coordinator {
+                let cells = snapshot.cells.map { row in
+                    row.map { cell in
+                        TerminalHostingView.BufferCell(
+                            char: cell.char,
+                            width: cell.width,
+                            fg: cell.fg,
+                            bg: cell.bg,
+                            attributes: cell.attributes
+                        )
+                    }
+                }
+                
+                let hostingSnapshot = TerminalHostingView.BufferSnapshot(
+                    cols: snapshot.cols,
+                    rows: snapshot.rows,
+                    viewportY: snapshot.viewportY,
+                    cursorX: snapshot.cursorX,
+                    cursorY: snapshot.cursorY,
+                    cells: cells
+                )
+                
+                coordinator.updateBuffer(from: hostingSnapshot)
+                
+                // Update terminal dimensions
+                terminalCols = snapshot.cols
+                terminalRows = snapshot.rows
+                if isConnecting { isConnecting = false; isConnected = true }
+            }
+            
+        case .output:
+            // Direct output event (not typically used in buffer mode)
+            hasReceivedData = true
+            if isConnecting { isConnecting = false; isConnected = true }
+            
+        case .resize(_, let dims):
+            let parts = dims.split(separator: "x")
+            if parts.count == 2, let c = Int(parts[0]), let r = Int(parts[1]) {
+                logger.info("WebSocket resize: \(c)x\(r)")
+                terminalCols = c
+                terminalRows = r
+            }
+            if isConnecting { isConnecting = false; isConnected = true }
+            
+        case .bell:
+            handleTerminalBell()
+            
+        case .exit(let exitCode):
+            logger.info("Session exited with code: \(exitCode)")
+            errorMessage = "Session ended (exit code: \(exitCode))"
+            isConnected = false
+            bufferWebSocketClient.unsubscribe(from: session.id)
+            
+        case .header(let width, let height):
+            terminalCols = width
+            terminalRows = height
+            if isConnecting { isConnecting = false; isConnected = true }
+
+        case .alert(let title, let message):
+            handleTerminalAlert(title: title, message: message)
+        }
+    }
+}
+
+// MARK: - SSEClientDelegate
+
+extension TerminalViewModel: SSEClientDelegate {
+    nonisolated func sseClient(_ client: SSEClient, didReceiveEvent event: SSEClient.SSEEvent) {
+        Task { @MainActor in
+            switch event {
+            case .connected:
+                // Mark as connected immediately on HTTP 200
+                if isConnecting {
+                    isConnecting = false
+                    isConnected = true
+                    errorMessage = nil
+                    logger.info("SSE connected - HTTP 200 received")
+                    logger.info("UI state: isConnecting=\(isConnecting) isConnected=\(isConnected)")
+                    
+                    // Start idle timer - if no data in 2 seconds, show "waiting for output"
+                    Task {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
+                        if isConnected && !hasReceivedData {
+                            logger.info("SSE connected but no data yet - showing idle hint")
+                            // Could add a "waiting for output..." state here
+                        }
+                    }
+
+                    // Bootstrap initial snapshot once after connection (async)
+                    Task { await self.bootstrapInitialSnapshot() }
+                }
+                
+            case .header(let cols, let rows):
+                // Clear spinner on header as secondary fail-safe
+                if isConnecting {
+                    isConnecting = false
+                    isConnected = true
+                    errorMessage = nil
+                    logger.info("SSE connected - received header (\(cols)x\(rows))")
+                    logger.info("UI state: isConnecting=\(isConnecting) isConnected=\(isConnected)")
+                }
+                
+                // Update terminal dimensions if provided
+                if cols > 0 && rows > 0 {
+                    terminalCols = cols
+                    terminalRows = rows
+                    logger.info("Terminal dimensions from header: \(cols)x\(rows)")
+                }
+                hasReceivedData = true
+                
+            case .terminalOutput(_, let type, let data):
+                // Clear spinner on any output as secondary fail-safe
+                if isConnecting {
+                    isConnecting = false
+                    isConnected = true
+                    errorMessage = nil
+                    logger.info("SSE connected - received terminal output")
+                    logger.info("UI state: isConnecting=\(isConnecting) isConnected=\(isConnected)")
+                }
+                
+                hasReceivedData = true
+                
+                // Handle different output types
+                if type == "r" {
+                    // Resize event - parse dimensions from data (WIDTHxHEIGHT format)
+                    let components = data.split(separator: "x")
+                    if components.count == 2,
+                       let width = Int(components[0]),
+                       let height = Int(components[1])
+                    {
+                        logger.info("SSE resize from output: \(width)x\(height)")
+                        terminalCols = width
+                        terminalRows = height
+                        // Don't need to send resize to server - this came from server
+                    }
+                } else if type == "o" {
+                    // For clean renderer, handle seeding phase
+                    if renderer == .swiftTermClean {
+                        if isSeeding {
+                            // Buffer during seeding
+                            bufferedSSEChunks.append(data)
+                            logger.debug("Buffered SSE chunk during seeding (len=\(data.count))")
+                        } else {
+                            // Feed raw ANSI directly
+                            onRawANSIUpdate?(data)
+                        }
+                    } else {
+                        // For other renderers, synthesize a simple cell buffer per line and pass to clean callback
+                        let lines = data.components(separatedBy: "\n")
+                        let cellRows: [[TerminalHostingView.BufferCell]] = lines.map { line in
+                            line.map { ch in
+                                TerminalHostingView.BufferCell(
+                                    char: String(ch),
+                                    width: 1,
+                                    fg: nil,
+                                    bg: nil,
+                                    attributes: nil
+                                )
+                            }
+                        }
+                        let cols = cellRows.map { $0.count }.max() ?? 0
+                        let rows = cellRows.count
+                        let snap = TerminalHostingView.BufferSnapshot(
+                            cols: cols,
+                            rows: rows,
+                            viewportY: 0,
+                            cursorX: 0,
+                            cursorY: max(0, rows - 1),
+                            cells: cellRows
+                        )
+                        if let clean = onBufferUpdateClean {
+                            clean(snap)
+                        } else {
+                            pendingAnsiChunks.append(data)
+                            logger.debug("Buffered ANSI chunk (len=\(data.count)); pending=\(pendingAnsiChunks.count)")
+                        }
+                        
+                        // Record for cast
+                        // TODO: Add cast recording support for ANSI data
+                        // if castRecorder.isRecording {
+                        //     castRecorder.addTerminalOutput(data)
+                        // }
+                    }
+                }
+                
+            case .resize(let cols, let rows, let sessionId):
+                // Validate sessionId
+                guard sessionId == session.id else {
+                    logger.warning("Ignoring resize for different session: \(sessionId)")
+                    return
+                }
+                logger.info("SSE resize event: \(cols)x\(rows)")
+                terminalCols = cols
+                terminalRows = rows
+                // TODO: Trigger terminal resize
+                
+            case .bell(let sessionId):
+                // Validate sessionId
+                guard sessionId == session.id else {
+                    logger.warning("Ignoring bell for different session: \(sessionId)")
+                    return
+                }
+                handleTerminalBell()
+                
+            case .alert(let title, let message, let sessionId):
+                // Validate sessionId
+                guard sessionId == session.id else {
+                    logger.warning("Ignoring alert for different session: \(sessionId)")
+                    return
+                }
+                handleTerminalAlert(title: title, message: message)
+                
+            case .exit(let exitCode, let sessionId):
+                // Validate sessionId
+                guard sessionId == session.id else {
+                    logger.warning("Ignoring exit for different session: \(sessionId)")
+                    return
+                }
+                // Clean up seeding state on exit
+                if isSeeding {
+                    isSeeding = false
+                    bufferedSSEChunks.removeAll()
+                    bufferWebSocketClient.unsubscribe(from: session.id)
+                }
+                logger.info("Session exited with code: \(exitCode)")
+                errorMessage = "Session ended (exit code: \(exitCode))"
+                isConnected = false
+                logger.info("UI state: isConnecting=\(isConnecting) isConnected=\(isConnected)")
+                sseClient?.stop()
+                sseClient = nil
+                
+            case .error(let message):
+                logger.error("SSE error: \(message)")
+                errorMessage = message
+                // Clean up seeding state on error
+                if isSeeding {
+                    completeSeeding()
+                }
             }
         }
     }
