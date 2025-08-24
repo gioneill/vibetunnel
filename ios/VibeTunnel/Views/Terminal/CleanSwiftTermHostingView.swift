@@ -299,41 +299,9 @@ struct CleanSwiftTermHostingView: UIViewRepresentable {
     // MARK: - Helper Methods
 
     private func applyTheme(to terminalView: CleanSwiftTermView) {
-        // Apply theme colors
+        // Apply theme using the enhanced theme system
         if let theme = viewModel.selectedTheme {
-            let foreground = UIColor(theme.foreground)
-            let background = UIColor(theme.background)
-            let cursor = UIColor(theme.cursor)
-
-            terminalView.applyTheme(
-                foreground: foreground,
-                background: background,
-                cursor: cursor
-            )
-
-            // Install ANSI colors (0-15: basic colors + bright variants)
-            let ansiColors = [
-                // Normal colors (0-7)
-                UIColor(theme.black),
-                UIColor(theme.red),
-                UIColor(theme.green),
-                UIColor(theme.yellow),
-                UIColor(theme.blue),
-                UIColor(theme.magenta),
-                UIColor(theme.cyan),
-                UIColor(theme.white),
-                // Bright colors (8-15) - use the same colors but lighter
-                UIColor(theme.brightBlack),
-                UIColor(theme.brightRed),
-                UIColor(theme.brightGreen),
-                UIColor(theme.brightYellow),
-                UIColor(theme.brightBlue),
-                UIColor(theme.brightMagenta),
-                UIColor(theme.brightCyan),
-                UIColor(theme.brightWhite)
-            ]
-
-            terminalView.installColorPalette(ansiColors)
+            terminalView.applyAdvancedTheme(theme)
         }
     }
 }
