@@ -34,7 +34,7 @@ struct Logger {
     /// Global log level threshold - only messages at this level or higher will be logged
     nonisolated(unsafe) static var globalLevel: LogLevel = {
         #if DEBUG
-            return .info
+            return .verbose
         #else
             return .warning
         #endif

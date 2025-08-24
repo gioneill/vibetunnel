@@ -7,9 +7,8 @@ enum AppConfig {
     /// Change this to control verbosity of logs
     static func configureLogging() {
         #if DEBUG
-            // In debug builds, default to info level to reduce noise
-            // Change to .verbose only when debugging binary protocol issues
-            Logger.globalLevel = .info
+            // Increase verbosity during debugging to surface connection traces
+            Logger.globalLevel = .verbose
         #else
             // In release builds, only show warnings and errors
             Logger.globalLevel = .warning

@@ -4,7 +4,19 @@
       "Bash(pnpm test:*)",
       "Bash(rg:*)",
       "Bash(./scripts/vtlog.sh:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(xcodebuild:*)",
+      "Bash(log show:*)",
+      "Bash([ -S \"$HOME/.vibetunnel/control.sock\" ])",
+      "Bash([ -S \"$HOME/.vibetunnel/api.sock\" ])",
+      "Bash([ -d node_modules ])",
+      "Bash(sudo:*)",
+      "Bash(log stream:*)",
+      "Bash(git log:*)",
+      "Bash(grep:*)",
+      "Read(//Users/grego/Developer/SwiftTermApp/**)",
+      "Read(//Users/grego/Developer/SwiftTermApp/**)",
+      "Bash(find:*)"
     ],
     "deny": []
   },
