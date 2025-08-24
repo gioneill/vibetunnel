@@ -347,8 +347,6 @@ struct TerminalView: View {
             }
 
             ToolbarItemGroup(placement: .navigationBarTrailing) {
-                QuickFontSizeButtons(fontSize: $fontSize)
-                    .fixedSize()
                 fileBrowserButton
                 widthSelectorButton
                 menuButton
