@@ -2,15 +2,15 @@ import os
 import SwiftTerm
 import SwiftUI
 
-private let logger = Logger(category: "CleanSwiftTermHost")
+private let logger = Logger(category: "SwiftTermHost")
 
-struct CleanSwiftTermHostingView: UIViewRepresentable {
+struct SwiftTermHostingView: UIViewRepresentable {
     var viewModel: TerminalViewModel
 
     // MARK: - Coordinator
 
     class Coordinator: NSObject, TerminalViewDelegate {
-        let parent: CleanSwiftTermHostingView
+        let parent: SwiftTermHostingView
         var lastBufferUpdate: Date = Date()
 
         // Viewport tracking for scrolling through large buffers
@@ -19,7 +19,7 @@ struct CleanSwiftTermHostingView: UIViewRepresentable {
         private var terminalVisibleRows: Int = 50 // Will be updated from actual terminal
         var isAtBottom: Bool = true
 
-        init(_ parent: CleanSwiftTermHostingView) {
+        init(_ parent: SwiftTermHostingView) {
             self.parent = parent
             super.init()
         }
@@ -103,116 +103,6 @@ struct CleanSwiftTermHostingView: UIViewRepresentable {
             }
         }
 
-        func convertBufferToANSI(_ snapshot: TerminalHostingView.BufferSnapshot) -> String {
-            var output = ""
-
-            // Update buffer tracking
-            updateBufferState(
-                totalRows: snapshot.rows,
-                viewportY: snapshot.viewportY,
-                cursorY: snapshot.cursorY
-            )
-
-            // Start frame: hide cursor, reset, move to home
-            output += "\u{001B}[?25l" // Hide cursor (prevent flicker)
-            output += "\u{001B}[0m" // Reset all attributes
-            output += "\u{001B}[H" // Move cursor home
-
-            // Get viewport window (fall back to a reasonable default if rows not initialized yet)
-            if terminalVisibleRows <= 0 {
-                // Default to a common terminal height until we learn the real value
-                terminalVisibleRows = 24
-            }
-
-            let (visibleStart, visibleEnd) = getVisibleWindow(bufferSize: snapshot.cells.count)
-            let visibleRows = Array(snapshot.cells[visibleStart..<min(visibleEnd, snapshot.cells.count)])
-
-            // Adjust cursor position relative to visible window
-            let adjustedCursorY = snapshot.cursorY - visibleStart
-
-            // Process each visible row
-            for rowIndex in 0..<visibleRows.count {
-                // Position cursor at start of line (1-based)
-                output += "\u{001B}[\(rowIndex + 1);1H"
-
-                let row = visibleRows[rowIndex]
-
-                // Track current attributes for optimization
-                var currentFg: Int? = nil
-                var currentBg: Int? = nil
-                var currentAttrs: Int = 0
-
-                // Process cells in row
-                for cell in row {
-                    // Handle attribute changes
-                    if let attrs = cell.attributes, attrs != currentAttrs {
-                        output += "\u{001B}[0m" // Reset
-                        currentFg = nil
-                        currentBg = nil
-                        currentAttrs = attrs
-
-                        // Apply text attributes
-                        if (attrs & 0x01) != 0 { output += "\u{001B}[1m" } // Bold
-                        if (attrs & 0x02) != 0 { output += "\u{001B}[3m" } // Italic
-                        if (attrs & 0x04) != 0 { output += "\u{001B}[4m" } // Underline
-                        if (attrs & 0x08) != 0 { output += "\u{001B}[2m" } // Dim
-                        if (attrs & 0x10) != 0 { output += "\u{001B}[7m" } // Inverse
-                        if (attrs & 0x40) != 0 { output += "\u{001B}[9m" } // Strikethrough
-                    } else if cell.attributes == nil && currentAttrs != 0 {
-                        output += "\u{001B}[0m" // Reset if no attributes
-                        currentFg = nil
-                        currentBg = nil
-                        currentAttrs = 0
-                    }
-
-                    // Handle foreground color
-                    if cell.fg != currentFg {
-                        currentFg = cell.fg
-                        if let fg = cell.fg {
-                            if fg <= 255 {
-                                output += "\u{001B}[38;5;\(fg)m"
-                            }
-                        } else {
-                            output += "\u{001B}[39m" // Default foreground
-                        }
-                    }
-
-                    // Handle background color
-                    if cell.bg != currentBg {
-                        currentBg = cell.bg
-                        if let bg = cell.bg {
-                            if bg <= 255 {
-                                output += "\u{001B}[48;5;\(bg)m"
-                            }
-                        } else {
-                            output += "\u{001B}[49m" // Default background
-                        }
-                    }
-
-                    // Output the character (or space if empty)
-                    output += cell.char.isEmpty ? " " : cell.char
-                }
-
-                // Clear to end of line (removes any leftover content)
-                output += "\u{001B}[K"
-            }
-
-            // Clear everything below last drawn row
-            output += "\u{001B}[J"
-
-            // Reset attributes
-            output += "\u{001B}[0m"
-
-            // Position cursor (1-based, using adjusted cursor position)
-            let cursorRow = max(1, min(terminalVisibleRows, adjustedCursorY + 1))
-            let cursorCol = max(1, snapshot.cursorX + 1)
-            output += "\u{001B}[\(cursorRow);\(cursorCol)H"
-
-            // Show cursor
-            output += "\u{001B}[?25h"
-
-            return output
-        }
 
         func setTerminalTitle(source: SwiftTerm.TerminalView, title: String) {
             // Update terminal title if needed
@@ -255,10 +145,10 @@ struct CleanSwiftTermHostingView: UIViewRepresentable {
         Coordinator(self)
     }
 
-    func makeUIView(context: Context) -> CleanSwiftTermView {
-        logger.info("Creating CleanSwiftTermView (raw ANSI mode)")
+    func makeUIView(context: Context) -> SwiftTermView {
+        logger.info("Creating SwiftTermView (raw ANSI mode)")
 
-        let terminalView = CleanSwiftTermView(frame: .zero)
+        let terminalView = SwiftTermView(frame: .zero)
 
         // Set the delegate through coordinator
         terminalView.terminalDelegate = context.coordinator
@@ -286,7 +176,7 @@ struct CleanSwiftTermHostingView: UIViewRepresentable {
         return terminalView
     }
 
-    func updateUIView(_ uiView: CleanSwiftTermView, context: Context) {
+    func updateUIView(_ uiView: SwiftTermView, context: Context) {
         // Only handle focus and theme changes
         if viewModel.shouldBecomeFirstResponder {
             _ = uiView.becomeFirstResponder()
@@ -298,7 +188,7 @@ struct CleanSwiftTermHostingView: UIViewRepresentable {
 
     // MARK: - Helper Methods
 
-    private func applyTheme(to terminalView: CleanSwiftTermView) {
+    private func applyTheme(to terminalView: SwiftTermView) {
         // Apply theme using the enhanced theme system
         if let theme = viewModel.selectedTheme {
             terminalView.applyAdvancedTheme(theme)

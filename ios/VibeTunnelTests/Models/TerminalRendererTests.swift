@@ -101,6 +101,30 @@ struct TerminalRendererTests {
         #expect(allCases.contains(.xterm))
     }
 
+    @Test("Migration from SwiftTermClean to SwiftTerm", .disabled("UserDefaults direct usage needs dependency injection refactor"))
+    func migrationFromSwiftTermClean() {
+        // Store original value to restore after test
+        let originalValue = UserDefaults.standard.string(forKey: userDefaultsKey)
+        defer {
+            // Restore original value
+            if let original = originalValue {
+                UserDefaults.standard.set(original, forKey: userDefaultsKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: userDefaultsKey)
+            }
+        }
+
+        // Set old SwiftTermClean value
+        UserDefaults.standard.set("SwiftTermClean", forKey: userDefaultsKey)
+
+        // Should migrate to swiftTerm
+        #expect(TerminalRenderer.selected == .swiftTerm)
+
+        // Should have updated UserDefaults
+        let savedValue = UserDefaults.standard.string(forKey: userDefaultsKey)
+        #expect(savedValue == "SwiftTerm")
+    }
+
     @Test("Round trip through UserDefaults", .disabled("UserDefaults direct usage needs dependency injection refactor"))
     func roundTripUserDefaults() {
         // Store original value to restore after test

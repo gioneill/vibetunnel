@@ -55,10 +55,10 @@ struct TerminalView: View {
         .onAppear {
             // Choose connection strategy per renderer
             switch selectedRenderer {
-            case .swiftTerm, .xterm:
-                viewModel.connectWebSocket()
-            case .swiftTermClean:
+            case .swiftTerm:
                 viewModel.connectSSE()
+            case .xterm:
+                viewModel.connectWebSocket()
             }
             isInputFocused = true
 
@@ -67,7 +67,7 @@ struct TerminalView: View {
             if savedWidth > 0 {
                 currentTerminalWidth = TerminalWidth.from(value: savedWidth)
                 selectedTerminalWidth = savedWidth
-                viewModel.setMaxWidth(savedWidth)
+                viewModel.resize(cols: savedWidth, rows: max(viewModel.terminalRows, 24))
                 logger.info("📐 Restored saved terminal width: \(savedWidth)")
             } else {
                 // Default to unlimited if no saved preference
@@ -182,7 +182,7 @@ struct TerminalView: View {
             let targetWidth = newWidth.value == 0 ? nil : newWidth.value
             if targetWidth != selectedTerminalWidth {
                 selectedTerminalWidth = targetWidth
-                viewModel.setMaxWidth(targetWidth ?? 0)
+                // Width is already handled by onChange(of: selectedTerminalWidth)
                 TerminalWidthManager.shared.defaultWidth = newWidth.value
             }
         }
@@ -526,7 +526,10 @@ struct TerminalView: View {
                 Button(action: {
                     selectedRenderer = renderer
                     TerminalRenderer.selected = renderer
-                    viewModel.terminalViewId = UUID() // Force recreate terminal view
+                    // Recreate view model for clean switch
+                    viewModel.disconnect()
+                    viewModel = TerminalViewModel(session: session, renderer: renderer)
+                    viewModel.connect()
                 }, label: {
                     HStack {
                         Text(renderer.displayName)
@@ -616,18 +619,7 @@ struct TerminalView: View {
             Group {
                 switch selectedRenderer {
                 case .swiftTerm:
-                    TerminalHostingView(
-                        session: session,
-                        fontSize: $fontSize,
-                        theme: selectedTheme,
-                        onInput: { text in
-                            viewModel.sendInput(text)
-                        },
-                        onResize: { cols, rows in
-                            viewModel.resize(cols: cols, rows: rows)
-                        },
-                        viewModel: viewModel
-                    )
+                    SwiftTermHostingView(viewModel: viewModel)
                 case .xterm:
                     XtermWebView(
                         session: session,
@@ -641,8 +633,6 @@ struct TerminalView: View {
                         },
                         viewModel: viewModel
                     )
-                case .swiftTermClean:
-                    CleanSwiftTermHostingView(viewModel: viewModel)
                 }
             }
             .id(viewModel.terminalViewId)
@@ -699,15 +689,10 @@ class TerminalViewModel {
     var isAtBottom = true
     var fitToWidth = false
 
-    // Coordinator tracking
-    private var isCoordinatorReady = false
-    private var pendingAnsiChunks: [String] = []
     private var sseBootstrapped = false
 
     // WebSocket client is managed internally via shared instance
     
-    /// Callback for clean SwiftTerm renderer
-    var onBufferUpdateClean: ((TerminalHostingView.BufferSnapshot) -> Void)?
     
     /// Callback for raw ANSI updates (clean renderer)
     var onRawANSIUpdate: ((String) -> Void)?
@@ -729,7 +714,6 @@ class TerminalViewModel {
     private var resizeDebounceTask: Task<Void, Never>?
     private var hasPerformedInitialResize = false
     private var isPerformingInitialResize = false
-    weak var terminalCoordinator: AnyObject? // Can be TerminalHostingView.Coordinator
 
     init(session: Session, renderer: TerminalRenderer = .selected) {
         self.session = session
@@ -756,12 +740,12 @@ class TerminalViewModel {
         errorMessage = nil
 
         switch renderer {
-        case .swiftTerm, .xterm:
-            // Use WebSocket buffers for native and xterm renderers
-            connectWebSocket()
-        case .swiftTermClean:
-            // Use SSE for clean renderer
+        case .swiftTerm:
+            // Use SSE for native SwiftTerm renderer
             connectSSE()
+        case .xterm:
+            // Use WebSocket for xterm renderer
+            connectWebSocket()
         }
     }
 
@@ -796,8 +780,8 @@ class TerminalViewModel {
         // Pass authentication service from APIClient for proper token attachment
         sseClient = SSEClient(url: streamURL, authenticationService: APIClient.shared.authenticationService)
         
-        // For clean renderer, start seeding phase
-        if renderer == .swiftTermClean {
+        // For SwiftTerm renderer, start seeding phase
+        if renderer == .swiftTerm {
             isSeeding = true
             bufferedSSEChunks = []
             
@@ -814,9 +798,9 @@ class TerminalViewModel {
                 
                 switch update {
                 case .bufferUpdate(let snapshot):
-                    // Convert snapshot to ANSI once for initial seed
-                    let seedANSI = self.convertBufferToANSI(snapshot)
-                    self.onRawANSIUpdate?(seedANSI)
+                    // For SwiftTerm renderer, we need raw ANSI not buffer snapshots
+                    // Skip the buffer update during seeding
+                    logger.debug("Received buffer update during seeding, skipping")
                     
                     // Clean up seeding state
                     self.completeSeeding()
@@ -1023,10 +1007,7 @@ class TerminalViewModel {
     }
 
     func getBufferContent() -> String? {
-        // Get the current terminal buffer content
-        if let coordinator = terminalCoordinator as? TerminalHostingView.Coordinator {
-            return coordinator.getBufferContent()
-        }
+        // Terminal buffer content access not available in simplified version
         return nil
     }
 
@@ -1056,10 +1037,6 @@ class TerminalViewModel {
         // Signal the terminal to scroll to bottom
         isAutoScrollEnabled = true
         isAtBottom = true
-        // The actual scrolling is handled by the terminal coordinator
-        if let coordinator = terminalCoordinator as? TerminalHostingView.Coordinator {
-            coordinator.scrollToBottom()
-        }
     }
 
     func updateScrollState(isAtBottom: Bool) {
@@ -1083,58 +1060,7 @@ class TerminalViewModel {
         }
     }
 
-    func setMaxWidth(_ maxWidth: Int) {
-        // Store the max width preference
-        // When maxWidth is 0, it means unlimited
 
-        if maxWidth == 0 {
-            // For unlimited width, calculate optimal width based on screen
-            let screenWidth = UIScreen.main.bounds.width
-            let padding: CGFloat = 32 // Account for UI padding
-            let charWidth: CGFloat = 9 // Approximate character width
-            let optimalCols = Int((screenWidth - padding) / charWidth)
-
-            resize(cols: max(optimalCols, 80), rows: max(terminalRows, 24))
-        } else if maxWidth != terminalCols {
-            // Use the specified width
-            resize(cols: maxWidth, rows: max(terminalRows, 24))
-        }
-
-        // Update the terminal coordinator
-        if let coordinator = terminalCoordinator as? TerminalHostingView.Coordinator {
-            coordinator.setMaxWidth(maxWidth)
-        }
-    }
-
-    /// Called when the terminal coordinator is fully initialized and ready
-    func notifyCoordinatorReady() {
-        isCoordinatorReady = true
-        logger.info("✅ Coordinator ready!")
-        // Flush any ANSI chunks buffered before coordinator was ready (for clean renderer via onBufferUpdateClean)
-        if !pendingAnsiChunks.isEmpty, let clean = onBufferUpdateClean {
-            logger.info("Flushing \(pendingAnsiChunks.count) pending ANSI chunk(s) to clean renderer")
-            for chunk in pendingAnsiChunks {
-                let lines = chunk.components(separatedBy: "\n")
-                let cellRows: [[TerminalHostingView.BufferCell]] = lines.map { line in
-                    line.map { ch in
-                        TerminalHostingView.BufferCell(char: String(ch), width: 1, fg: nil, bg: nil, attributes: nil)
-                    }
-                }
-                let cols = cellRows.map { $0.count }.max() ?? 0
-                let rows = cellRows.count
-                let snap = TerminalHostingView.BufferSnapshot(
-                    cols: cols,
-                    rows: rows,
-                    viewportY: 0,
-                    cursorX: 0,
-                    cursorY: max(0, rows - 1),
-                    cells: cellRows
-                )
-                clean(snap)
-            }
-            pendingAnsiChunks.removeAll()
-        }
-    }
 
     /// Fetch a one-time snapshot and feed it as initial history before live SSE updates
     private func bootstrapInitialSnapshot() async {
@@ -1160,30 +1086,10 @@ class TerminalViewModel {
                 return
             }
 
-            // For clean renderer, synthesize cells and send via clean callback if available
-            let lines = ansi.components(separatedBy: "\n")
-            let cellRows: [[TerminalHostingView.BufferCell]] = lines.map { line in
-                line.map { ch in
-                    TerminalHostingView.BufferCell(char: String(ch), width: 1, fg: nil, bg: nil, attributes: nil)
-                }
-            }
-            let cols = cellRows.map { $0.count }.max() ?? 0
-            let rows = cellRows.count
-            let snap = TerminalHostingView.BufferSnapshot(
-                cols: cols,
-                rows: rows,
-                viewportY: 0,
-                cursorX: 0,
-                cursorY: max(0, rows - 1),
-                cells: cellRows
-            )
-            if let clean = onBufferUpdateClean {
-                logger.info("Feeding bootstrapped snapshot (rows=\(rows), cols=\(cols)) to clean renderer")
-                clean(snap)
-            } else {
-                // No clean callback; buffer raw for later
-                logger.info("Clean renderer not ready; buffering bootstrapped ANSI (len=\(ansi.count))")
-                pendingAnsiChunks.append(ansi)
+            // For SwiftTerm renderer, feed raw ANSI directly
+            if let rawANSIUpdate = onRawANSIUpdate {
+                logger.info("Feeding bootstrapped ANSI (len=\(ansi.count)) to SwiftTerm renderer")
+                rawANSIUpdate(ansi)
             }
         } catch {
             logger.error("Failed to bootstrap snapshot: \(error)")
@@ -1213,58 +1119,6 @@ class TerminalViewModel {
         bufferedSSEChunks.removeAll()
     }
     
-    private func convertBufferToANSI(_ snapshot: BufferSnapshot) -> String {
-        var output = ""
-        
-        // Clear screen and reset for initial seed
-        output += "\u{001B}[2J"  // Clear entire screen
-        output += "\u{001B}[0m"   // Reset attributes
-        output += "\u{001B}[H"    // Move cursor home
-        
-        // Convert visible viewport
-        for (rowIndex, row) in snapshot.cells.enumerated() {
-            // Position cursor at start of line
-            output += "\u{001B}[\(rowIndex + 1);1H"
-            
-            var currentFg: Int? = nil
-            var currentBg: Int? = nil
-            
-            for cell in row {
-                // Only set colors if they change
-                if cell.fg != currentFg {
-                    currentFg = cell.fg
-                    if let fg = cell.fg {
-                        output += "\u{001B}[38;5;\(fg)m"
-                    } else {
-                        output += "\u{001B}[39m"  // Default fg
-                    }
-                }
-                
-                if cell.bg != currentBg {
-                    currentBg = cell.bg
-                    if let bg = cell.bg {
-                        output += "\u{001B}[48;5;\(bg)m"
-                    } else {
-                        output += "\u{001B}[49m"  // Default bg
-                    }
-                }
-                
-                // Output character
-                output += cell.char.isEmpty ? " " : cell.char
-            }
-            
-            // Clear to end of line
-            output += "\u{001B}[K"
-        }
-        
-        // Position cursor
-        output += "\u{001B}[\(snapshot.cursorY + 1);\(snapshot.cursorX + 1)H"
-        output += "\u{001B}[?25h"  // Show cursor
-        
-        logger.info("Seeded terminal with \(snapshot.cells.count) rows from buffer snapshot")
-        
-        return output
-    }
 
     func updateTerminalSize(cols: Int, rows: Int) {
         // Update terminal dimensions and notify server
@@ -1301,36 +1155,12 @@ extension TerminalViewModel {
         case .bufferUpdate(let snapshot):
             hasReceivedData = true
             
-            // Convert BufferSnapshot to TerminalHostingView.BufferSnapshot
-            if let coordinator = terminalCoordinator as? TerminalHostingView.Coordinator {
-                let cells = snapshot.cells.map { row in
-                    row.map { cell in
-                        TerminalHostingView.BufferCell(
-                            char: cell.char,
-                            width: cell.width,
-                            fg: cell.fg,
-                            bg: cell.bg,
-                            attributes: cell.attributes
-                        )
-                    }
-                }
-                
-                let hostingSnapshot = TerminalHostingView.BufferSnapshot(
-                    cols: snapshot.cols,
-                    rows: snapshot.rows,
-                    viewportY: snapshot.viewportY,
-                    cursorX: snapshot.cursorX,
-                    cursorY: snapshot.cursorY,
-                    cells: cells
-                )
-                
-                coordinator.updateBuffer(from: hostingSnapshot)
-                
-                // Update terminal dimensions
-                terminalCols = snapshot.cols
-                terminalRows = snapshot.rows
-                if isConnecting { isConnecting = false; isConnected = true }
-            }
+            // Update terminal dimensions from buffer snapshot
+            terminalCols = snapshot.cols
+            terminalRows = snapshot.rows
+            if isConnecting { isConnecting = false; isConnected = true }
+            
+            // Note: XtermWebView handles buffer updates internally
             
         case .output:
             // Direct output event (not typically used in buffer mode)
@@ -1438,8 +1268,8 @@ extension TerminalViewModel: SSEClientDelegate {
                         // Don't need to send resize to server - this came from server
                     }
                 } else if type == "o" {
-                    // For clean renderer, handle seeding phase
-                    if renderer == .swiftTermClean {
+                    // For SwiftTerm renderer, handle seeding phase
+                    if renderer == .swiftTerm {
                         if isSeeding {
                             // Buffer during seeding
                             bufferedSSEChunks.append(data)
@@ -1448,42 +1278,6 @@ extension TerminalViewModel: SSEClientDelegate {
                             // Feed raw ANSI directly
                             onRawANSIUpdate?(data)
                         }
-                    } else {
-                        // For other renderers, synthesize a simple cell buffer per line and pass to clean callback
-                        let lines = data.components(separatedBy: "\n")
-                        let cellRows: [[TerminalHostingView.BufferCell]] = lines.map { line in
-                            line.map { ch in
-                                TerminalHostingView.BufferCell(
-                                    char: String(ch),
-                                    width: 1,
-                                    fg: nil,
-                                    bg: nil,
-                                    attributes: nil
-                                )
-                            }
-                        }
-                        let cols = cellRows.map { $0.count }.max() ?? 0
-                        let rows = cellRows.count
-                        let snap = TerminalHostingView.BufferSnapshot(
-                            cols: cols,
-                            rows: rows,
-                            viewportY: 0,
-                            cursorX: 0,
-                            cursorY: max(0, rows - 1),
-                            cells: cellRows
-                        )
-                        if let clean = onBufferUpdateClean {
-                            clean(snap)
-                        } else {
-                            pendingAnsiChunks.append(data)
-                            logger.debug("Buffered ANSI chunk (len=\(data.count)); pending=\(pendingAnsiChunks.count)")
-                        }
-                        
-                        // Record for cast
-                        // TODO: Add cast recording support for ANSI data
-                        // if castRecorder.isRecording {
-                        //     castRecorder.addTerminalOutput(data)
-                        // }
                     }
                 }
                 

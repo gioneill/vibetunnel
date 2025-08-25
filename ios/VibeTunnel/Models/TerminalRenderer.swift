@@ -5,7 +5,6 @@ import Foundation
 enum TerminalRenderer: String, CaseIterable, Codable {
     case swiftTerm = "SwiftTerm"
     case xterm = "xterm.js"
-    case swiftTermClean = "SwiftTermClean"
 
     var displayName: String {
         switch self {
@@ -13,8 +12,6 @@ enum TerminalRenderer: String, CaseIterable, Codable {
             "SwiftTerm (Native)"
         case .xterm:
             "xterm.js (WebView)"
-        case .swiftTermClean:
-            "SwiftTerm (Clean)"
         }
     }
 
@@ -24,18 +21,22 @@ enum TerminalRenderer: String, CaseIterable, Codable {
             "Native Swift terminal emulator with best performance"
         case .xterm:
             "JavaScript-based terminal, identical to web version"
-        case .swiftTermClean:
-            "Minimal SwiftTerm implementation for debugging"
         }
     }
 
     /// The currently selected renderer (persisted in UserDefaults)
     static var selected: Self {
         get {
-            if let rawValue = UserDefaults.standard.string(forKey: "selectedTerminalRenderer"),
-               let renderer = Self(rawValue: rawValue)
-            {
-                return renderer
+            if let rawValue = UserDefaults.standard.string(forKey: "selectedTerminalRenderer") {
+                // Migration: map old "SwiftTermClean" to new .swiftTerm
+                if rawValue == "SwiftTermClean" {
+                    // Migrate to new value
+                    UserDefaults.standard.set("SwiftTerm", forKey: "selectedTerminalRenderer")
+                    return .swiftTerm
+                }
+                if let renderer = Self(rawValue: rawValue) {
+                    return renderer
+                }
             }
             return .swiftTerm // Default
         }

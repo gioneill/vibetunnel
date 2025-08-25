@@ -2,10 +2,29 @@ import os
 import SwiftTerm
 import UIKit
 
-private let logger = Logger(category: "CleanSwiftTerm")
+extension UIColor {
+    /// Convert UIColor to SwiftTerm.Color (which uses 16-bit color components)
+    func toSwiftTermColor() -> SwiftTerm.Color {
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+
+        getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+
+        // Convert from 0.0-1.0 range to 0-65535 range
+        let red16 = UInt16(red * 65_535.0)
+        let green16 = UInt16(green * 65_535.0)
+        let blue16 = UInt16(blue * 65_535.0)
+
+        return SwiftTerm.Color(red: red16, green: green16, blue: blue16)
+    }
+}
+
+private let logger = Logger(category: "SwiftTerm")
 
 /// A minimal SwiftTerm TerminalView subclass with basic configuration
-class CleanSwiftTermView: SwiftTerm.TerminalView {
+class SwiftTermView: SwiftTerm.TerminalView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         setupTerminal()
@@ -29,7 +48,7 @@ class CleanSwiftTermView: SwiftTerm.TerminalView {
 
         // Log initialization
         let terminal = getTerminal()
-        logger.info("CleanSwiftTermView initialized with cols: \(terminal.cols), rows: \(terminal.rows)")
+        logger.info("SwiftTermView initialized with cols: \(terminal.cols), rows: \(terminal.rows)")
     }
 
     deinit {
@@ -38,7 +57,7 @@ class CleanSwiftTermView: SwiftTerm.TerminalView {
         DispatchQueue.main.async { [weak self] in
             self?.updateUiClosed()
         }
-        logger.info("CleanSwiftTermView deinitialized")
+        logger.info("SwiftTermView deinitialized")
     }
 
     /// Apply a complete terminal theme with full ANSI color palette
