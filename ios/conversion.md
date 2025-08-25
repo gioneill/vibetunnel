@@ -12,7 +12,7 @@ The iOS app already implements most core functionality but lacks several feature
 
 | Feature | Web | iOS | Status | iOS Adaptation Notes |
 |---------|-----|-----|--------|---------------------|
-| Terminal emulation | xterm.js | SwiftTerm + xterm.js | ✅ Complete | Dual renderer approach is excellent |
+| Terminal emulation | xterm.js | SwiftTerm + xterm.js | ✅ Complete | Dual renderer approach; SwiftTerm is default |
 | Copy/paste | Native clipboard | Touch selection | ✅ Complete | iOS implementation is more intuitive |
 | URL highlighting | Clickable URLs | URL detection (configurable) | ✅ Complete | Native iOS text detection |
 | Font size control | 8-32px range | 8-32pt with presets | ✅ Complete | Quick preset buttons are better for mobile |
@@ -98,7 +98,7 @@ The iOS app already implements most core functionality but lacks several feature
 |---------|-----|-----|--------|---------------------|
 | Split view | Side-by-side list/terminal | iPad multitasking | ✅ Different | iPad split view is better |
 | WebSocket binary | ✓ | ✓ | ✅ Complete | - |
-| SSE streaming | Text output | Not used | N/A | WebSocket is sufficient |
+| SSE streaming | Text output | Used (SwiftTerm), WS (xterm) | ✅ Complete | SwiftTerm uses SSE; xterm uses WS buffer* |
 | Offline support | Service worker | Basic offline handling | ⚠️ Partial | Improve offline mode |
 | PWA features | Installable | Native app | N/A | Already native |
 | URL routing | Deep links | URL schemes | ✅ Complete | - |
@@ -116,6 +116,9 @@ The iOS app already implements most core functionality but lacks several feature
 | Safe area handling | CSS env() | Native | ✅ Complete | Better implementation |
 | Cast file support | Converter utility | Full support + sharing | ✅ Enhanced | File type registration |
 | Recording | No | Asciinema recording | ✅ iOS Exclusive | Unique feature |
+| Renderer switching | N/A | SwiftTerm/xterm.js toggle | ✅ iOS Exclusive | Available in terminal settings |
+
+*Note: xterm's WebSocket buffer snapshots stem from early prototype decisions and may be unified later.
 
 ## Priority Implementation Recommendations
 

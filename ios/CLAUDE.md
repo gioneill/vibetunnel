@@ -19,15 +19,22 @@ open ios/VibeTunnel-iOS.xcodeproj
 ## Architecture
 
 - SwiftUI for the user interface
-- WebSocket client for real-time terminal data
+- Dual transport support for real-time terminal data:
+  - SSE (Server-Sent Events) for SwiftTerm raw ANSI streaming
+  - WebSocket buffers for xterm.js and session previews
 - Shared protocol definitions with macOS app
 
 ## Key Files
 
 - `VibeTunnelApp.swift` - Main app entry point
 - `ContentView.swift` - Primary UI
-- `TerminalView.swift` - Terminal display component
-- `WebSocketClient.swift` - Server communication
+- `TerminalView.swift` - Terminal display component with renderer selection
+- `SwiftTermHostingView.swift` - Native SwiftTerm renderer wrapper
+- `SwiftTermView.swift` - SwiftTerm implementation
+- `XtermWebView.swift` - WebKit-based xterm.js renderer
+- `SSEClient.swift` - Server-Sent Events client for streaming
+- `BufferWebSocketClient.swift` - WebSocket client for buffer snapshots
+- `Models/TerminalRenderer.swift` - Renderer selection and persistence
 
 ## Building
 

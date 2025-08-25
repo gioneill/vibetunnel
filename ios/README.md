@@ -6,7 +6,7 @@
 
 - **Native SwiftUI app** optimized for iOS 18+
 - **Beautiful terminal-inspired UI** with custom theme and animations
-- **Full terminal emulation** using SwiftTerm
+- **Dual terminal renderers**: SwiftTerm (SSE text) and xterm.js (WebView, WS buffer), selectable in Terminal settings
 - **Real-time session management** with SSE streaming
 - **Keyboard toolbar** with special keys (arrows, ESC, CTRL combinations)
 - **Font size adjustment** with live preview
@@ -127,12 +127,13 @@ VibeTunnel/
 ├── Views/                  # UI Components
 │   ├── Connection/        # Server connection flow
 │   ├── Sessions/          # Session list and management
-│   ├── Terminal/          # Terminal emulator integration
+│   ├── Terminal/          # Terminal emulator integration (SwiftTermHostingView, XtermWebView)
 │   └── Common/            # Reusable components
 ├── Services/              # Networking and API
 │   ├── APIClient          # HTTP client for REST API
 │   ├── SessionService     # Session management logic
-│   └── SSEClient          # Server-Sent Events streaming
+│   ├── SSEClient          # Server-Sent Events streaming
+│   └── BufferWebSocketClient # WebSocket client for buffer snapshots
 ├── Utils/                 # Helpers and extensions
 │   └── Theme.swift        # Design system and styling
 └── Resources/             # Assets and configuration
@@ -169,6 +170,7 @@ VibeTunnel/
 - **Swift**: 6.0 compatible
 - **Dependencies**: SwiftTerm for terminal emulation
 - **Architecture**: MVVM with SwiftUI and Combine
+- **Transport split**: SwiftTerm uses SSE text; xterm.js currently uses WebSocket buffer snapshots (historical choice from initial project setup; subject to change)
 
 ### Logging with vtlog
 

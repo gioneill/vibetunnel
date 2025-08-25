@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 📚 Documentation
+- Clarified iOS renderer/transports — SwiftTerm (SSE text, default) and xterm.js (WebView with WS buffer snapshots; legacy choice from initial setup)
+- Documented improved ANSI/formatting in the native SwiftTerm renderer
+- Added terminal renderer testing strategy for iOS app
+- Updated architecture documentation to reflect dual transport support
+
 ### 🐛 Bug Fixes
 - Fix session creation "data couldn't be read" error on Mac app (#500)
 
