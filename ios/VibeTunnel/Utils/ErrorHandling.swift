@@ -48,6 +48,13 @@ struct IdentifiableError: Identifiable {
     let error: Error
 }
 
+/// A simple, user-presentable error payload for alerts
+struct ErrorAlert: Identifiable, Equatable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
 /// View extension for identifiable error alerts.
 /// Enables error presentation using SwiftUI's item-based alert API.
 extension View {
