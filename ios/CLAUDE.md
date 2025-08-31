@@ -39,18 +39,19 @@ open ios/VibeTunnel-iOS.xcodeproj
 ## Building
 
 ```bash
-# Build for simulator
-xcodebuild -project VibeTunnel-iOS.xcodeproj -scheme VibeTunnel -sdk iphonesimulator
-
-# Build for device
-xcodebuild -project VibeTunnel-iOS.xcodeproj -scheme VibeTunnel -sdk iphoneos
+# Build using the build script (from ios/ directory)
+./scripts/build.sh                           # Release build for device
+./scripts/build.sh --configuration Debug     # Debug build for device  
+./scripts/build.sh --simulator               # Release build for simulator
+./scripts/build.sh --simulator --configuration Debug  # Debug build for simulator
 ```
 
 ## Testing
 
 ```bash
-# Run tests
-xcodebuild test -project VibeTunnel-iOS.xcodeproj -scheme VibeTunnel -destination 'platform=iOS Simulator,name=iPhone 15'
+# Run tests (from ios/ directory)
+./scripts/test-with-coverage.sh       # Full test suite with coverage report (75% threshold)
+./scripts/quick-test.sh               # Quick test run with minimal output
 ```
 
 ## Viewing Logs

@@ -16,7 +16,7 @@
 #   --device                         Build for iOS device (default)
 #
 # ENVIRONMENT VARIABLES:
-#   USE_WORKSPACE=YES|NO            Use workspace instead of project (default: YES)
+#   USE_WORKSPACE=YES|NO            Use workspace instead of project (default: NO)
 #
 # OUTPUTS:
 #   - Built app at DerivedData location
@@ -42,7 +42,7 @@ PROJECT_DIR="$(dirname "$IOS_DIR")"
 # Default values
 CONFIGURATION="Release"
 DESTINATION="generic/platform=iOS"
-USE_WORKSPACE="${USE_WORKSPACE:-YES}"
+USE_WORKSPACE="${USE_WORKSPACE:-NO}"
 
 # Determine project/workspace
 if [[ "$USE_WORKSPACE" == "YES" ]] && [[ -f "$IOS_DIR/VibeTunnel-iOS.xcodeproj/project.xcworkspace/contents.xcworkspacedata" ]]; then
