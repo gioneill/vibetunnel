@@ -142,14 +142,17 @@ struct ServerListView: View {
         .onDisappear {
             discoveryService.stopDiscovery()
         }
-        .alert(item: $viewModel.presentedErrorAlert) { alert in
-            Alert(
-                title: Text(alert.title),
-                message: Text(alert.message),
-                dismissButton: .default(Text("OK")) {
-                    viewModel.errorMessage = nil
-                }
-            )
+        .alert(
+            "Error",
+            isPresented: Binding(
+                get: { viewModel.errorMessage != nil },
+                set: { if !$0 { viewModel.errorMessage = nil } }
+            ),
+            presenting: viewModel.errorMessage
+        ) { _ in
+            Button("OK", role: .cancel) { }
+        } message: { message in
+            Text(message)
         }
         .sheet(isPresented: $showingDiscoverySheet) {
             DiscoveryDetailSheet(
