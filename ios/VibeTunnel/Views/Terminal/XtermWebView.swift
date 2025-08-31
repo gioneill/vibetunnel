@@ -49,6 +49,7 @@ struct XtermWebView: UIViewRepresentable {
         weak var webView: WKWebView?
         private var bufferWebSocketClient: BufferWebSocketClient?
         private let logger = Logger(category: "XtermWebView")
+        private var sseClient: SSEClient?
 
         init(_ parent: XtermWebView) {
             self.parent = parent
@@ -282,7 +283,12 @@ struct XtermWebView: UIViewRepresentable {
                 self?.handleWebSocketEvent(event)
             }
 
-            // SSE fallback removed; xterm uses WebSocket buffer snapshots only
+            // Also set up SSE as fallback
+            if let streamURL = APIClient.shared.streamURL(for: parent.session.id) {
+                sseClient = SSEClient(url: streamURL)
+                sseClient?.delegate = self
+                sseClient?.start()
+            }
         }
 
         private func handleWebSocketEvent(_ event: TerminalWebSocketEvent) {
@@ -294,6 +300,13 @@ struct XtermWebView: UIViewRepresentable {
             case .output(_, let data):
                 writeToTerminal(data)
 
+            case .resize:
+                // Handle resize if needed
+                break
+
+            case .bell:
+                // Could play a sound or visual bell
+                break
 
             default:
                 break
@@ -364,7 +377,7 @@ extension XtermWebView.Coordinator: SSEClientDelegate {
             case .connected:
                 break
             case .terminalOutput(_, let type, let data):
-                if type == "o" {
+                if type == "o" { // output
                     writeToTerminal(data)
                 }
             case .exit(let exitCode, _):
