@@ -1203,7 +1203,6 @@ extension TerminalViewModel: SSEClientDelegate {
         Task { @MainActor in
             switch event {
             case .connected:
-                // Mark as connected immediately on HTTP 200
                 if isConnecting {
                     isConnecting = false
                     isConnected = true
@@ -1211,39 +1210,17 @@ extension TerminalViewModel: SSEClientDelegate {
                     logger.info("SSE connected - HTTP 200 received")
                     logger.info("UI state: isConnecting=\(isConnecting) isConnected=\(isConnected)")
                     
-                    // Start idle timer - if no data in 2 seconds, show "waiting for output"
                     Task {
-                        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
                         if isConnected && !hasReceivedData {
                             logger.info("SSE connected but no data yet - showing idle hint")
-                            // Could add a "waiting for output..." state here
                         }
                     }
 
-                    // Bootstrap initial snapshot once after connection (async)
                     Task { await self.bootstrapInitialSnapshot() }
                 }
                 
-            case .header(let cols, let rows):
-                // Clear spinner on header as secondary fail-safe
-                if isConnecting {
-                    isConnecting = false
-                    isConnected = true
-                    errorMessage = nil
-                    logger.info("SSE connected - received header (\(cols)x\(rows))")
-                    logger.info("UI state: isConnecting=\(isConnecting) isConnected=\(isConnected)")
-                }
-                
-                // Update terminal dimensions if provided
-                if cols > 0 && rows > 0 {
-                    terminalCols = cols
-                    terminalRows = rows
-                    logger.info("Terminal dimensions from header: \(cols)x\(rows)")
-                }
-                hasReceivedData = true
-                
             case .terminalOutput(_, let type, let data):
-                // Clear spinner on any output as secondary fail-safe
                 if isConnecting {
                     isConnecting = false
                     isConnected = true
@@ -1254,9 +1231,7 @@ extension TerminalViewModel: SSEClientDelegate {
                 
                 hasReceivedData = true
                 
-                // Handle different output types
                 if type == "r" {
-                    // Resize event - parse dimensions from data (WIDTHxHEIGHT format)
                     let components = data.split(separator: "x")
                     if components.count == 2,
                        let width = Int(components[0]),
@@ -1265,56 +1240,23 @@ extension TerminalViewModel: SSEClientDelegate {
                         logger.info("SSE resize from output: \(width)x\(height)")
                         terminalCols = width
                         terminalRows = height
-                        // Don't need to send resize to server - this came from server
                     }
                 } else if type == "o" {
-                    // For SwiftTerm renderer, handle seeding phase
                     if renderer == .swiftTerm {
                         if isSeeding {
-                            // Buffer during seeding
                             bufferedSSEChunks.append(data)
                             logger.debug("Buffered SSE chunk during seeding (len=\(data.count))")
                         } else {
-                            // Feed raw ANSI directly
                             onRawANSIUpdate?(data)
                         }
                     }
                 }
                 
-            case .resize(let cols, let rows, let sessionId):
-                // Validate sessionId
-                guard sessionId == session.id else {
-                    logger.warning("Ignoring resize for different session: \(sessionId)")
-                    return
-                }
-                logger.info("SSE resize event: \(cols)x\(rows)")
-                terminalCols = cols
-                terminalRows = rows
-                // TODO: Trigger terminal resize
-                
-            case .bell(let sessionId):
-                // Validate sessionId
-                guard sessionId == session.id else {
-                    logger.warning("Ignoring bell for different session: \(sessionId)")
-                    return
-                }
-                handleTerminalBell()
-                
-            case .alert(let title, let message, let sessionId):
-                // Validate sessionId
-                guard sessionId == session.id else {
-                    logger.warning("Ignoring alert for different session: \(sessionId)")
-                    return
-                }
-                handleTerminalAlert(title: title, message: message)
-                
             case .exit(let exitCode, let sessionId):
-                // Validate sessionId
                 guard sessionId == session.id else {
                     logger.warning("Ignoring exit for different session: \(sessionId)")
                     return
                 }
-                // Clean up seeding state on exit
                 if isSeeding {
                     isSeeding = false
                     bufferedSSEChunks.removeAll()
@@ -1330,7 +1272,6 @@ extension TerminalViewModel: SSEClientDelegate {
             case .error(let message):
                 logger.error("SSE error: \(message)")
                 errorMessage = message
-                // Clean up seeding state on error
                 if isSeeding {
                     completeSeeding()
                 }

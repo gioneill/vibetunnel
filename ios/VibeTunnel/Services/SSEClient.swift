@@ -19,11 +19,7 @@ final class SSEClient: NSObject, @unchecked Sendable {
     /// Events received from the SSE stream
     enum SSEEvent {
         case connected
-        case header(cols: Int, rows: Int)
         case terminalOutput(timestamp: Double, type: String, data: String)
-        case resize(cols: Int, rows: Int, sessionId: String)
-        case bell(sessionId: String)
-        case alert(title: String, message: String, sessionId: String)
         case exit(exitCode: Int, sessionId: String)
         case error(String)
     }
@@ -43,7 +39,6 @@ final class SSEClient: NSObject, @unchecked Sendable {
 
     @MainActor
     func start() {
-        // Append token to URL for SSE authentication
         var requestURL = url
         if let token = authenticationService?.getTokenForQuery() {
             var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
@@ -70,13 +65,10 @@ final class SSEClient: NSObject, @unchecked Sendable {
     }
 
     private func processBuffer() {
-        // Convert buffer to string
         guard let string = String(data: buffer, encoding: .utf8) else { return }
 
-        // Split by double newline (SSE event separator)
         let events = string.components(separatedBy: "\n\n")
 
-        // Keep the last incomplete event in buffer
         if !string.hasSuffix("\n\n") && events.count > 1 {
             if let lastEvent = events.last, let lastEventData = lastEvent.data(using: .utf8) {
                 buffer = lastEventData
@@ -85,9 +77,7 @@ final class SSEClient: NSObject, @unchecked Sendable {
             buffer = Data()
         }
 
-        // Process complete events
         for (index, eventString) in events.enumerated() {
-            // Skip the last event if buffer wasn't cleared (it's incomplete)
             if index == events.count - 1 && !buffer.isEmpty {
                 continue
             }
@@ -102,7 +92,6 @@ final class SSEClient: NSObject, @unchecked Sendable {
         var eventType: String?
         var eventData: String?
 
-        // Parse SSE format
         let lines = eventString.components(separatedBy: "\n")
         for line in lines {
             if line.hasPrefix("event:") {
@@ -117,7 +106,6 @@ final class SSEClient: NSObject, @unchecked Sendable {
             }
         }
 
-        // Process based on event type
         if eventType == "message" || eventType == nil, let data = eventData {
             logger.verbose("SSE: Event type=\(eventType ?? "message"), dataLen=\(data.count)")
             parseTerminalData(data)
@@ -125,37 +113,17 @@ final class SSEClient: NSObject, @unchecked Sendable {
     }
 
     private func parseTerminalData(_ data: String) {
-        // The data should be a JSON array: [timestamp, type, data] or ['exit', exitCode, sessionId]
-        // Or it could be a JSON object for newer event types
         guard let jsonData = data.data(using: .utf8) else { return }
 
         do {
-            // Try parsing as an array first (legacy format)
             if let array = try JSONSerialization.jsonObject(with: jsonData) as? [Any] {
                 if array.count >= 3 {
-                    // Check for exit event
                     if let firstElement = array[0] as? String, firstElement == "exit",
                        let exitCode = array[1] as? Int,
                        let sessionId = array[2] as? String
                     {
                         delegate?.sseClient(self, didReceiveEvent: .exit(exitCode: exitCode, sessionId: sessionId))
                     }
-                    // Check for asciinema header event
-                    else if let _ = array[0] as? Double,
-                            let type = array[1] as? String,
-                            type == "h", // header type
-                            let headerData = array[2] as? String
-                    {
-                        // Parse header data (should be "WIDTHxHEIGHT" format)
-                        let components = headerData.split(separator: "x")
-                        if components.count == 2,
-                           let width = Int(components[0]),
-                           let height = Int(components[1])
-                        {
-                            delegate?.sseClient(self, didReceiveEvent: .header(cols: width, rows: height))
-                        }
-                    }
-                    // Regular terminal output
                     else if let timestamp = array[0] as? Double,
                             let type = array[1] as? String,
                             let outputData = array[2] as? String
@@ -169,37 +137,6 @@ final class SSEClient: NSObject, @unchecked Sendable {
                             didReceiveEvent: .terminalOutput(timestamp: timestamp, type: type, data: outputData)
                         )
                     }
-                }
-            }
-            // Try parsing as JSON object for newer event types
-            else if let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-                    let type = json["type"] as? String,
-                    let sessionId = json["sessionId"] as? String
-            {
-                switch type {
-                case "resize":
-                    if let cols = json["cols"] as? Int,
-                       let rows = json["rows"] as? Int {
-                        delegate?.sseClient(self, didReceiveEvent: .resize(cols: cols, rows: rows, sessionId: sessionId))
-                    }
-                case "bell":
-                    delegate?.sseClient(self, didReceiveEvent: .bell(sessionId: sessionId))
-                case "alert":
-                    if let title = json["title"] as? String,
-                       let message = json["message"] as? String {
-                        delegate?.sseClient(self, didReceiveEvent: .alert(title: title, message: message, sessionId: sessionId))
-                    }
-                case "output":
-                    if let data = json["data"] as? String {
-                        let timestamp = json["timestamp"] as? Double ?? Date().timeIntervalSince1970
-                        if !firstOutputLogged {
-                            firstOutputLogged = true
-                            logger.info("SSE: First output received (len=\(data.count)) preview=\(data.prefix(80))")
-                        }
-                        delegate?.sseClient(self, didReceiveEvent: .terminalOutput(timestamp: timestamp, type: "o", data: data))
-                    }
-                default:
-                    logger.debug("Unknown SSE event type: \(type)")
                 }
             }
         } catch {

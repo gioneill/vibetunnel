@@ -24,13 +24,10 @@ enum TerminalRenderer: String, CaseIterable, Codable {
         }
     }
 
-    /// The currently selected renderer (persisted in UserDefaults)
     static var selected: Self {
         get {
             if let rawValue = UserDefaults.standard.string(forKey: "selectedTerminalRenderer") {
-                // Migration: map old "SwiftTermClean" to new .swiftTerm
                 if rawValue == "SwiftTermClean" {
-                    // Migrate to new value
                     UserDefaults.standard.set("SwiftTerm", forKey: "selectedTerminalRenderer")
                     return .swiftTerm
                 }

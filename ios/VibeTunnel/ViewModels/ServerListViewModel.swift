@@ -28,9 +28,18 @@ protocol ServerListViewModelProtocol: Observable {
 class ServerListViewModel: ServerListViewModelProtocol {
     var profiles: [ServerProfile] = []
     var isLoading = false
-    var errorMessage: String?
+    var errorMessage: String? {
+        didSet {
+            if let message = errorMessage {
+                presentedErrorAlert = ErrorAlert(title: "Error", message: message)
+            } else {
+                presentedErrorAlert = nil
+            }
+        }
+    }
     var showLoginView = false
     var currentConnectingProfile: ServerProfile?
+    var presentedErrorAlert: ErrorAlert?
 
     let connectionManager: ConnectionManager
     private let networkMonitor: NetworkMonitoring

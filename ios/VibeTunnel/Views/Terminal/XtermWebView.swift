@@ -294,13 +294,6 @@ struct XtermWebView: UIViewRepresentable {
             case .output(_, let data):
                 writeToTerminal(data)
 
-            case .resize:
-                // Handle resize if needed
-                break
-
-            case .bell:
-                // Could play a sound or visual bell
-                break
 
             default:
                 break
@@ -369,20 +362,15 @@ extension XtermWebView.Coordinator: SSEClientDelegate {
         Task { @MainActor in
             switch event {
             case .connected:
-                // Connection established - XtermWebView doesn't need to handle this
                 break
-            case .header(let cols, let rows):
-                logger.debug("Received header: \(cols)x\(rows)")
             case .terminalOutput(_, let type, let data):
-                if type == "o" { // output
+                if type == "o" {
                     writeToTerminal(data)
                 }
             case .exit(let exitCode, _):
                 writeToTerminal("\r\n[Process exited with code \(exitCode)]\r\n")
             case .error(let error):
                 logger.error("SSE error: \(error)")
-            case .resize, .bell, .alert:
-                break
             }
         }
     }
