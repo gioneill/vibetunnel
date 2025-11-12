@@ -766,11 +766,6 @@ class TerminalViewModel {
     }
     
     func connectSSE() {
-        // Ensure auth is set for BufferWebSocketClient (for seeding phase)
-        if let auth = APIClient.shared.authenticationService {
-            bufferWebSocketClient.setAuthenticationService(auth)
-        }
-        
         // Build SSE URL using APIClient (ensures correct base URL)
         guard let streamURL = APIClient.shared.streamURL(for: session.id) else {
             errorMessage = "Invalid SSE URL"
@@ -780,40 +775,10 @@ class TerminalViewModel {
         // Pass authentication service from APIClient for proper token attachment
         sseClient = SSEClient(url: streamURL, authenticationService: APIClient.shared.authenticationService)
         
-        // For SwiftTerm renderer, start seeding phase
+        // For SwiftTerm renderer, start seeding phase (buffer SSE until snapshot applied)
         if renderer == .swiftTerm {
             isSeeding = true
             bufferedSSEChunks = []
-            
-            // Subscribe to /buffers for one-time seed
-            bufferWebSocketClient.subscribe(to: session.id) { [weak self] update in
-                guard let self = self else { return }
-                
-                // Only process if still seeding
-                guard self.isSeeding else {
-                    // Unsubscribe if we're no longer seeding
-                    self.bufferWebSocketClient.unsubscribe(from: self.session.id)
-                    return
-                }
-                
-                switch update {
-                case .bufferUpdate(let snapshot):
-                    // For SwiftTerm renderer, we need raw ANSI not buffer snapshots
-                    // Skip the buffer update during seeding
-                    logger.debug("Received buffer update during seeding, skipping")
-                    
-                    // Clean up seeding state
-                    self.completeSeeding()
-                    
-                default:
-                    // For any other event during seeding, just log it
-                    logger.debug("Received non-buffer event during seeding: \(update)")
-                    break
-                }
-            }
-            
-            // Ensure socket connection is established for seeding
-            bufferWebSocketClient.connect()
         }
         
         sseClient?.delegate = self
@@ -832,6 +797,20 @@ class TerminalViewModel {
                 isConnecting = false
                 sseClient?.stop()
                 sseClient = nil
+            }
+        }
+        
+        // Safety valve: if snapshot takes too long, stop buffering to avoid getting stuck
+        if renderer == .swiftTerm {
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 7_000_000_000) // 7 seconds
+                await MainActor.run {
+                    guard let self else { return }
+                    if self.isSeeding {
+                        logger.warning("Snapshot timeout during seeding - flushing buffered SSE without snapshot")
+                        self.completeSeeding()
+                    }
+                }
             }
         }
     }
@@ -1083,6 +1062,9 @@ class TerminalViewModel {
 
             guard !ansi.isEmpty else {
                 logger.info("Snapshot contained no output events")
+                if isSeeding {
+                    completeSeeding()
+                }
                 return
             }
 
@@ -1091,8 +1073,15 @@ class TerminalViewModel {
                 logger.info("Feeding bootstrapped ANSI (len=\(ansi.count)) to SwiftTerm renderer")
                 rawANSIUpdate(ansi)
             }
+            if isSeeding {
+                completeSeeding()
+            }
         } catch {
             logger.error("Failed to bootstrap snapshot: \(error)")
+            // Fallback: if snapshot fails, complete seeding so live SSE can render
+            if isSeeding {
+                completeSeeding()
+            }
         }
     }
 
@@ -1107,7 +1096,8 @@ class TerminalViewModel {
     
     private func completeSeeding() {
         // Unsubscribe from buffers
-        bufferWebSocketClient.unsubscribe(from: session.id)
+        // No-op now for SwiftTerm; BufferWebSocketClient isn't used in seeding anymore
+        // (kept for xterm path elsewhere)
         
         // End seeding phase
         isSeeding = false
@@ -1260,7 +1250,6 @@ extension TerminalViewModel: SSEClientDelegate {
                 if isSeeding {
                     isSeeding = false
                     bufferedSSEChunks.removeAll()
-                    bufferWebSocketClient.unsubscribe(from: session.id)
                 }
                 logger.info("Session exited with code: \(exitCode)")
                 errorMessage = "Session ended (exit code: \(exitCode))"
